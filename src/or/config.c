@@ -5910,8 +5910,8 @@ parse_dir_fallback_line(const char *line,
       orport = (int)tor_parse_long(cp+strlen("orport="), 10,
                                    1, 65535, &ok, NULL);
     } else if (!strcmpstart(cp, "id=")) {
-      ok = !base16_decode(id, DIGEST_LEN,
-                          cp+strlen("id="), strlen(cp)-strlen("id="));
+      ok = base16_decode(id, DIGEST_LEN,
+                          cp+strlen("id="), strlen(cp)-strlen("id=")) < 0 ? 0 : 1;
     } else if (!strcasecmpstart(cp, "ipv6=")) {
       if (ipv6_addrport_ptr) {
         log_warn(LD_CONFIG, "Redundant ipv6 addr/port on FallbackDir line");

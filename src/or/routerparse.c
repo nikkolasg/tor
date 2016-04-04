@@ -1512,7 +1512,7 @@ router_parse_entry_from_string(const char *s, const char *end,
     char d[DIGEST_LEN];
     tor_assert(tok->n_args == 1);
     tor_strstrip(tok->args[0], " ");
-    if (base16_decode(d, DIGEST_LEN, tok->args[0], strlen(tok->args[0]))) {
+    if (base16_decode(d, DIGEST_LEN, tok->args[0], strlen(tok->args[0])) != DIGEST_LEN) {
       log_warn(LD_DIR, "Couldn't decode router fingerprint %s",
                escaped(tok->args[0]));
       goto err;
@@ -1737,7 +1737,7 @@ extrainfo_parse_entry_from_string(const char *s, const char *end,
   strlcpy(extrainfo->nickname, tok->args[0], sizeof(extrainfo->nickname));
   if (strlen(tok->args[1]) != HEX_DIGEST_LEN ||
       base16_decode(extrainfo->cache_info.identity_digest, DIGEST_LEN,
-                    tok->args[1], HEX_DIGEST_LEN)) {
+                    tok->args[1], HEX_DIGEST_LEN)  != DIGEST_LEN) {
     log_warn(LD_DIR,"Invalid fingerprint %s on \"extra-info\"",
              escaped(tok->args[1]));
     goto err;
@@ -1957,7 +1957,7 @@ authority_cert_parse_from_string(const char *s, const char **end_of_string)
   tok = find_by_keyword(tokens, K_FINGERPRINT);
   tor_assert(tok->n_args);
   if (base16_decode(fp_declared, DIGEST_LEN, tok->args[0],
-                    strlen(tok->args[0]))) {
+                    strlen(tok->args[0])) != DIGEST_LEN) {
     log_warn(LD_DIR, "Couldn't decode key certificate fingerprint %s",
              escaped(tok->args[0]));
     goto err;
@@ -3094,7 +3094,7 @@ networkstatus_parse_vote_from_string(const char *s, const char **eos_out,
       voter->nickname = tor_strdup(tok->args[0]);
       if (strlen(tok->args[1]) != HEX_DIGEST_LEN ||
           base16_decode(voter->identity_digest, sizeof(voter->identity_digest),
-                        tok->args[1], HEX_DIGEST_LEN) < 0) {
+                        tok->args[1], HEX_DIGEST_LEN)  != DIGEST_LEN) {
         log_warn(LD_DIR, "Error decoding identity digest %s in "
                  "network-status document.", escaped(tok->args[1]));
         goto err;
@@ -3143,7 +3143,7 @@ networkstatus_parse_vote_from_string(const char *s, const char **eos_out,
       }
       if (strlen(tok->args[0]) != HEX_DIGEST_LEN ||
         base16_decode(voter->vote_digest, sizeof(voter->vote_digest),
-                      tok->args[0], HEX_DIGEST_LEN) < 0) {
+                      tok->args[0], HEX_DIGEST_LEN) != DIGEST_LEN) {
         log_warn(LD_DIR, "Error decoding vote digest %s in "
                  "network-status consensus.", escaped(tok->args[0]));
         goto err;
@@ -3168,7 +3168,7 @@ networkstatus_parse_vote_from_string(const char *s, const char **eos_out,
     if (strlen(tok->args[0]) == HEX_DIGEST_LEN) {
       networkstatus_voter_info_t *voter = smartlist_get(ns->voters, 0);
       if (base16_decode(voter->legacy_id_digest, DIGEST_LEN,
-                        tok->args[0], HEX_DIGEST_LEN)<0)
+                        tok->args[0], HEX_DIGEST_LEN) != DIGEST_LEN)
         bad = 1;
       else
         bad = 0;
@@ -3327,7 +3327,7 @@ networkstatus_parse_vote_from_string(const char *s, const char **eos_out,
 
     if (strlen(id_hexdigest) != HEX_DIGEST_LEN ||
         base16_decode(declared_identity, sizeof(declared_identity),
-                      id_hexdigest, HEX_DIGEST_LEN) < 0) {
+                      id_hexdigest, HEX_DIGEST_LEN) != DIGEST_LEN) {
       log_warn(LD_DIR, "Error decoding declared identity %s in "
                "network-status document.", escaped(id_hexdigest));
       goto err;
@@ -3342,7 +3342,7 @@ networkstatus_parse_vote_from_string(const char *s, const char **eos_out,
     sig->alg = alg;
     if (strlen(sk_hexdigest) != HEX_DIGEST_LEN ||
         base16_decode(sig->signing_key_digest, sizeof(sig->signing_key_digest),
-                      sk_hexdigest, HEX_DIGEST_LEN) < 0) {
+                      sk_hexdigest, HEX_DIGEST_LEN) != DIGEST_LEN) {
       log_warn(LD_DIR, "Error decoding declared signing key digest %s in "
                "network-status document.", escaped(sk_hexdigest));
       tor_free(sig);
@@ -3543,6 +3543,8 @@ networkstatus_parse_detached_signatures(const char *s, const char *eos)
                "signatures document", flavor, algname);
       continue;
     }
+    // XXX Should it not be always DIGEST256_LEN ? Running the tests with
+    // the condition ` != DIGEST256_LEN` fails.
     if (base16_decode(digests->d[alg], DIGEST256_LEN,
                       hexdigest, strlen(hexdigest)) < 0) {
       log_warn(LD_DIR, "Bad encoding on consensus-digest in detached "
@@ -3617,14 +3619,14 @@ networkstatus_parse_detached_signatures(const char *s, const char *eos)
 
     if (strlen(id_hexdigest) != HEX_DIGEST_LEN ||
         base16_decode(id_digest, sizeof(id_digest),
-                      id_hexdigest, HEX_DIGEST_LEN) < 0) {
+                      id_hexdigest, HEX_DIGEST_LEN) != DIGEST_LEN) {
       log_warn(LD_DIR, "Error decoding declared identity %s in "
                "network-status vote.", escaped(id_hexdigest));
       goto err;
     }
     if (strlen(sk_hexdigest) != HEX_DIGEST_LEN ||
         base16_decode(sk_digest, sizeof(sk_digest),
-                      sk_hexdigest, HEX_DIGEST_LEN) < 0) {
+                      sk_hexdigest, HEX_DIGEST_LEN) != DIGEST_LEN) {
       log_warn(LD_DIR, "Error decoding declared signing key digest %s in "
                "network-status vote.", escaped(sk_hexdigest));
       goto err;
@@ -4826,7 +4828,7 @@ tor_version_parse(const char *s, tor_version_t *out)
     memwipe(digest, 0, sizeof(digest));
     if ( hexlen == 0 || (hexlen % 2) == 1)
       return -1;
-    if (base16_decode(digest, hexlen/2, cp, hexlen))
+    if (base16_decode(digest, hexlen/2, cp, hexlen) != hexlen/2)
       return -1;
     memcpy(out->git_tag, digest, hexlen/2);
     out->git_tag_len = hexlen/2;

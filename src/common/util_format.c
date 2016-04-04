@@ -511,7 +511,7 @@ int
 base16_decode(char *dest, size_t destlen, const char *src, size_t srclen)
 {
   const char *end;
-
+  char *dest_orig = dest;
   int v1,v2;
   if ((srclen % 2) != 0)
     return -1;
@@ -530,6 +530,10 @@ base16_decode(char *dest, size_t destlen, const char *src, size_t srclen)
     ++dest;
     src+=2;
   }
-  return 0;
+
+  tor_assert((dest-dest_orig) <= (ssize_t)destlen);
+  tor_assert((dest-dest_orig) <= INT_MAX);
+
+  return (int)(dest-dest_orig);
 }
 

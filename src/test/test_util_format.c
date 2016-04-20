@@ -154,7 +154,7 @@ test_util_format_base64_decode_nopad(void *ignored)
   uint8_t expected[] = {0x65, 0x78, 0x61, 0x6D, 0x70, 0x6C, 0x65};
   char real_src[] = "ZXhhbXBsZQ";
   char src2[] = "SGksdGhpc2lzYXRlc3Rmb3JiYXNlNjRkZWNvZGVub3BhZGZ1bmN0aW";
-  uint8_t *dst2;
+  uint8_t *dst2 = tor_malloc_zero(40);
 
   src = tor_malloc_zero(256);
   dst = tor_malloc_zero(1000);
@@ -184,15 +184,15 @@ test_util_format_base64_decode_nopad(void *ignored)
   tt_int_op(res, OP_EQ, 7);
   tt_mem_op(real_dst, OP_EQ, expected, 7);
 
-  // test fails 
-  dst2 = tor_malloc_zero(40);
-  res = base64_decode_nopad(dst2,40,src2,strlen(src2));  
+  // #17868 issue
+  tt_int_op(54,OP_EQ,strlen(src2));
+  res = base64_decode_nopad(dst2,40,src2,strlen(src2));
   tt_int_op(res,OP_EQ,40);
-  tor_free(dst2);
  done:
   tor_free(src);
   tor_free(dst);
   tor_free(real_dst);
+  tor_free(dst2);
 }
 
 static void

@@ -125,7 +125,8 @@ add_fingerprint_to_dir(const char *fp, authdir_config_t *list,
 
   fingerprint = tor_strdup(fp);
   tor_strstrip(fingerprint, " ");
-  if (base16_decode(d, DIGEST_LEN, fingerprint, strlen(fingerprint)) != DIGEST_LEN) {
+  if (base16_decode(d, DIGEST_LEN, fingerprint, strlen(fingerprint))
+          != DIGEST_LEN) {
     log_warn(LD_DIRSERV, "Couldn't decode fingerprint \"%s\"",
              escaped(fp));
     tor_free(fingerprint);
@@ -2663,7 +2664,8 @@ measured_bw_line_parse(measured_bw_line_t *out, const char *orig_line)
       cp+=strlen("node_id=$");
 
       if (strlen(cp) != HEX_DIGEST_LEN ||
-          base16_decode(out->node_id, DIGEST_LEN, cp, HEX_DIGEST_LEN) != DIGEST_LEN) {
+          base16_decode(out->node_id, DIGEST_LEN,
+              cp, HEX_DIGEST_LEN) != DIGEST_LEN) {
         log_warn(LD_DIRSERV, "Invalid node_id in bandwidth file line: %s",
                  escaped(orig_line));
         tor_free(line);

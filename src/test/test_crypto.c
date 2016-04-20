@@ -2067,7 +2067,8 @@ test_crypto_ed25519_testvectors(void *arg)
 #define EQ(a,h) test_memeq_hex((const char*)(a), (h))
 
     tt_int_op(sizeof(sk), OP_EQ, DECODE(sk, ED25519_SECRET_KEYS[i]));
-    tt_int_op(sizeof(blinding_param), OP_EQ, DECODE(blinding_param, ED25519_BLINDING_PARAMS[i]));
+    tt_int_op(sizeof(blinding_param), OP_EQ, DECODE(blinding_param,
+                ED25519_BLINDING_PARAMS[i]));
 
     tt_int_op(0, OP_EQ, ed25519_secret_key_from_seed(&esk, sk));
     EQ(esk.seckey, ED25519_EXPANDED_SECRET_KEYS[i]);

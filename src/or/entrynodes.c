@@ -1299,7 +1299,8 @@ entry_guards_parse_state(or_state_t *state, int set, char **msg)
         log_warn(LD_BUG, "EntryGuardAddedBy line is not long enough.");
         continue;
       }
-      if (base16_decode(d, sizeof(d), line->value, HEX_DIGEST_LEN) != DIGEST_LEN ||
+      if (base16_decode(d, sizeof(d), line->value, HEX_DIGEST_LEN)
+              != DIGEST_LEN ||
           line->value[HEX_DIGEST_LEN] != ' ') {
         log_warn(LD_BUG, "EntryGuardAddedBy line %s does not begin with "
                  "hex digest", escaped(line->value));

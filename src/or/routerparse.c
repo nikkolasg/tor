@@ -1512,7 +1512,8 @@ router_parse_entry_from_string(const char *s, const char *end,
     char d[DIGEST_LEN];
     tor_assert(tok->n_args == 1);
     tor_strstrip(tok->args[0], " ");
-    if (base16_decode(d, DIGEST_LEN, tok->args[0], strlen(tok->args[0])) != DIGEST_LEN) {
+    if (base16_decode(d, DIGEST_LEN, tok->args[0], strlen(tok->args[0]))
+            != DIGEST_LEN) {
       log_warn(LD_DIR, "Couldn't decode router fingerprint %s",
                escaped(tok->args[0]));
       goto err;

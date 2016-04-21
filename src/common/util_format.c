@@ -322,6 +322,12 @@ base64_decode_nopad(uint8_t *dest, size_t destlen,
       buflen = srclen + 1;
       break;
   }
+  if (destlen < (srclen*3)/4)
+    return -1;
+
+  if (destlen > SIZE_T_CEILING)
+    return -1;
+
   int n = base64_decode_internal((char*)dest, destlen, buf, buflen);
   tor_free(buf);
   return n;

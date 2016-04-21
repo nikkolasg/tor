@@ -186,8 +186,9 @@ test_util_format_base64_decode_nopad(void *ignored)
 
   // #17868 issue
   tt_int_op(54,OP_EQ,strlen(src2));
-  res = base64_decode_nopad(dst2,40,src2,strlen(src2));
+  res = base64_decode_nopad(dst2,40,src2,54);
   tt_int_op(res,OP_EQ,40);
+  tt_mem_op(dst2,OP_EQ,"Hi,thisisatestforbase64decodenopadfuncti",40)
  done:
   tor_free(src);
   tor_free(dst);

@@ -148,6 +148,22 @@ get_n_authorities(dirinfo_type_t type)
   return n;
 }
 
+/** Initialise schedule, want_authority, and increment on in the download
+ * status dlstatus, then call download_status_reset() on it.
+ * It is safe to call this function or download_status_reset() multiple times
+ * on a new dlstatus. But it should *not* be called after a dlstatus has been
+ * used to count download attempts or failures. */
+static void
+download_status_cert_init(download_status_t *dlstatus)
+{
+  dlstatus->schedule = DL_SCHED_CONSENSUS;
+  dlstatus->want_authority = DL_WANT_ANY_DIRSERVER;
+  dlstatus->increment_on = DL_SCHED_INCREMENT_FAILURE;
+
+  /* Use the new schedule to set next_attempt_at */
+  download_status_reset(dlstatus);
+}
+
 /** Reset the download status of a specified element in a dsmap */
 static void
 download_status_reset_by_sk_in_cl(cert_list_t *cl, const char *digest)
@@ -168,6 +184,7 @@ download_status_reset_by_sk_in_cl(cert_list_t *cl, const char *digest)
     /* Insert before we reset */
     dlstatus = tor_malloc_zero(sizeof(*dlstatus));
     dsmap_set(cl->dl_status_map, digest, dlstatus);
+    download_status_cert_init(dlstatus);
   }
   tor_assert(dlstatus);
   /* Go ahead and reset it */
@@ -206,7 +223,7 @@ download_status_is_ready_by_sk_in_cl(cert_list_t *cl,
      * too.
      */
     dlstatus = tor_malloc_zero(sizeof(*dlstatus));
-    download_status_reset(dlstatus);
+    download_status_cert_init(dlstatus);
     dsmap_set(cl->dl_status_map, digest, dlstatus);
     rv = 1;
   }
@@ -225,7 +242,7 @@ get_cert_list(const char *id_digest)
   cl = digestmap_get(trusted_dir_certs, id_digest);
   if (!cl) {
     cl = tor_malloc_zero(sizeof(cert_list_t));
-    cl->dl_status_by_id.schedule = DL_SCHED_CONSENSUS;
+    download_status_cert_init(&cl->dl_status_by_id);
     cl->certs = smartlist_new();
     cl->dl_status_map = dsmap_new();
     digestmap_set(trusted_dir_certs, id_digest, cl);
@@ -896,7 +913,8 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now)
 
     if (smartlist_len(fps) > 1) {
       resource = smartlist_join_strings(fps, "", 0, NULL);
-      /* XXX - do we want certs from authorities or mirrors? - teor */
+      /* We want certs from mirrors, because they will almost always succeed.
+       */
       directory_get_from_dirserver(DIR_PURPOSE_FETCH_CERTIFICATE, 0,
                                    resource, PDS_RETRY_IF_NO_SERVERS,
                                    DL_WANT_ANY_DIRSERVER);
@@ -942,7 +960,8 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now)
 
     if (smartlist_len(fp_pairs) > 1) {
       resource = smartlist_join_strings(fp_pairs, "", 0, NULL);
-      /* XXX - do we want certs from authorities or mirrors? - teor */
+      /* We want certs from mirrors, because they will almost always succeed.
+       */
       directory_get_from_dirserver(DIR_PURPOSE_FETCH_CERTIFICATE, 0,
                                    resource, PDS_RETRY_IF_NO_SERVERS,
                                    DL_WANT_ANY_DIRSERVER);
@@ -1597,11 +1616,10 @@ router_picked_poor_directory_log(const routerstatus_t *rs)
   STMT_BEGIN                                                                  \
     if (result == NULL && try_ip_pref && options->ClientUseIPv4               \
         && fascist_firewall_use_ipv6(options) && !server_mode(options)        \
-        && n_not_preferred && !n_busy) {                                      \
+        && !n_busy) {                                                         \
       n_excluded = 0;                                                         \
       n_busy = 0;                                                             \
       try_ip_pref = 0;                                                        \
-      n_not_preferred = 0;                                                    \
       goto retry_label;                                                       \
     }                                                                         \
   STMT_END                                                                    \
@@ -1620,7 +1638,6 @@ router_picked_poor_directory_log(const routerstatus_t *rs)
       n_excluded = 0;                                                         \
       n_busy = 0;                                                             \
       try_ip_pref = 1;                                                        \
-      n_not_preferred = 0;                                                    \
       goto retry_label;                                                       \
     }                                                                         \
   STMT_END
@@ -1673,7 +1690,7 @@ router_pick_directory_server_impl(dirinfo_type_t type, int flags,
   const int no_microdesc_fetching = (flags & PDS_NO_EXISTING_MICRODESC_FETCH);
   const int for_guard = (flags & PDS_FOR_GUARD);
   int try_excluding = 1, n_excluded = 0, n_busy = 0;
-  int try_ip_pref = 1, n_not_preferred = 0;
+  int try_ip_pref = 1;
 
   if (!consensus)
     return NULL;
@@ -1687,8 +1704,9 @@ router_pick_directory_server_impl(dirinfo_type_t type, int flags,
   overloaded_direct = smartlist_new();
   overloaded_tunnel = smartlist_new();
 
-  const int skip_or = router_skip_or_reachability(options, try_ip_pref);
-  const int skip_dir = router_skip_dir_reachability(options, try_ip_pref);
+  const int skip_or_fw = router_skip_or_reachability(options, try_ip_pref);
+  const int skip_dir_fw = router_skip_dir_reachability(options, try_ip_pref);
+  const int must_have_or = directory_must_use_begindir(options);
 
   /* Find all the running dirservers we know about. */
   SMARTLIST_FOREACH_BEGIN(nodelist_get_list(), const node_t *, node) {
@@ -1740,18 +1758,16 @@ router_pick_directory_server_impl(dirinfo_type_t type, int flags,
      * address for each router (if any). (To ensure correct load-balancing
      * we try routers that only have one address both times.)
      */
-    if (!fascistfirewall || skip_or ||
-        fascist_firewall_allows_rs(status, FIREWALL_OR_CONNECTION,
-                                   try_ip_pref))
+    if (!fascistfirewall || skip_or_fw ||
+        fascist_firewall_allows_node(node, FIREWALL_OR_CONNECTION,
+                                     try_ip_pref))
       smartlist_add(is_trusted ? trusted_tunnel :
                     is_overloaded ? overloaded_tunnel : tunnel, (void*)node);
-    else if (skip_dir ||
-             fascist_firewall_allows_rs(status, FIREWALL_DIR_CONNECTION,
-                                        try_ip_pref))
+    else if (!must_have_or && (skip_dir_fw ||
+             fascist_firewall_allows_node(node, FIREWALL_DIR_CONNECTION,
+                                          try_ip_pref)))
       smartlist_add(is_trusted ? trusted_direct :
                     is_overloaded ? overloaded_direct : direct, (void*)node);
-    else if (!tor_addr_is_null(&status->ipv6_addr))
-      ++n_not_preferred;
   } SMARTLIST_FOREACH_END(node);
 
   if (smartlist_len(tunnel)) {
@@ -1839,7 +1855,7 @@ router_pick_trusteddirserver_impl(const smartlist_t *sourcelist,
   smartlist_t *pick_from;
   int n_busy = 0;
   int try_excluding = 1, n_excluded = 0;
-  int try_ip_pref = 1, n_not_preferred = 0;
+  int try_ip_pref = 1;
 
   if (!sourcelist)
     return NULL;
@@ -1851,8 +1867,9 @@ router_pick_trusteddirserver_impl(const smartlist_t *sourcelist,
   overloaded_direct = smartlist_new();
   overloaded_tunnel = smartlist_new();
 
-  const int skip_or = router_skip_or_reachability(options, try_ip_pref);
-  const int skip_dir = router_skip_dir_reachability(options, try_ip_pref);
+  const int skip_or_fw = router_skip_or_reachability(options, try_ip_pref);
+  const int skip_dir_fw = router_skip_dir_reachability(options, try_ip_pref);
+  const int must_have_or = directory_must_use_begindir(options);
 
   SMARTLIST_FOREACH_BEGIN(sourcelist, const dir_server_t *, d)
     {
@@ -1888,16 +1905,14 @@ router_pick_trusteddirserver_impl(const smartlist_t *sourcelist,
        * address for each router (if any). (To ensure correct load-balancing
        * we try routers that only have one address both times.)
        */
-      if (!fascistfirewall || skip_or ||
+      if (!fascistfirewall || skip_or_fw ||
           fascist_firewall_allows_dir_server(d, FIREWALL_OR_CONNECTION,
                                              try_ip_pref))
         smartlist_add(is_overloaded ? overloaded_tunnel : tunnel, (void*)d);
-      else if (skip_dir ||
+      else if (!must_have_or && (skip_dir_fw ||
                fascist_firewall_allows_dir_server(d, FIREWALL_DIR_CONNECTION,
-                                                  try_ip_pref))
+                                                  try_ip_pref)))
         smartlist_add(is_overloaded ? overloaded_direct : direct, (void*)d);
-      else if (!tor_addr_is_null(&d->ipv6_addr))
-        ++n_not_preferred;
     }
   SMARTLIST_FOREACH_END(d);
 

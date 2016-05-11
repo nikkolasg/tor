@@ -1067,7 +1067,7 @@ circuit_predict_and_launch_new(void)
   if (rep_hist_get_predicted_internal(now, &hidserv_needs_uptime,
                                       &hidserv_needs_capacity) &&
       ((num_uptime_internal<2 && hidserv_needs_uptime) ||
-        num_internal<2)
+        num_internal<3)
         && router_have_consensus_path() != CONSENSUS_PATH_UNKNOWN) {
     if (hidserv_needs_uptime)
       flags |= CIRCLAUNCH_NEED_UPTIME;
@@ -2141,10 +2141,11 @@ optimistic_data_enabled(void)
 {
   const or_options_t *options = get_options();
   if (options->OptimisticData < 0) {
-    /* XXX023 consider having auto default to 1 rather than 0 before
-     * the 0.2.3 branch goes stable. See bug 3617. -RD */
+    /* Note: this default was 0 before #18815 was merged. We can't take the
+     * parameter out of the consensus until versions before that are all
+     * obsolete. */
     const int32_t enabled =
-      networkstatus_get_param(NULL, "UseOptimisticData", 0, 0, 1);
+      networkstatus_get_param(NULL, "UseOptimisticData", /*default*/ 1, 0, 1);
     return (int)enabled;
   }
   return options->OptimisticData;

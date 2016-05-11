@@ -307,9 +307,9 @@ fixed_get_uname(void)
 }
 
 #define TEST_OPTIONS_OLD_VALUES   "TestingV3AuthInitialVotingInterval 1800\n" \
-  "TestingClientBootstrapConsensusMaxDownloadTries 7\n" \
-  "TestingClientBootstrapConsensusAuthorityOnlyMaxDownloadTries 4\n" \
-  "TestingClientBootstrapConsensusMaxInProgressTries 3\n" \
+  "ClientBootstrapConsensusMaxDownloadTries 7\n" \
+  "ClientBootstrapConsensusAuthorityOnlyMaxDownloadTries 4\n" \
+  "ClientBootstrapConsensusMaxInProgressTries 3\n" \
   "TestingV3AuthInitialVoteDelay 300\n"   \
   "TestingV3AuthInitialDistDelay 300\n" \
   "TestingClientMaxIntervalWithoutRequest 600\n" \
@@ -513,8 +513,9 @@ test_options_validate__nickname(void *ignored)
   ret = options_validate(tdata->old_opt, tdata->opt, tdata->def_opt, 0, &msg);
   tt_int_op(ret, OP_EQ, -1);
   tt_str_op(msg, OP_EQ,
-            "Nickname 'ThisNickNameIsABitTooLong' is wrong length or"
-            " contains illegal characters.");
+            "Nickname 'ThisNickNameIsABitTooLong', nicknames must be between "
+            "1 and 19 characters inclusive, and must contain only the "
+            "characters [a-zA-Z0-9].");
   tor_free(msg);
 
   free_options_test_data(tdata);

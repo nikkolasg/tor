@@ -784,7 +784,7 @@ typedef enum rend_auth_type_t {
 
 /** Client-side configuration of authorization for a hidden service. */
 typedef struct rend_service_authorization_t {
-  char descriptor_cookie[REND_DESC_COOKIE_LEN];
+  uint8_t descriptor_cookie[REND_DESC_COOKIE_LEN];
   char onion_address[REND_SERVICE_ADDRESS_LEN+1];
   rend_auth_type_t auth_type;
 } rend_service_authorization_t;
@@ -1294,21 +1294,26 @@ typedef struct connection_t {
 
   time_t timestamp_created; /**< When was this connection_t created? */
 
-  /* XXXX_IP6 make this IPv6-capable */
   int socket_family; /**< Address family of this connection's socket.  Usually
-                      * AF_INET, but it can also be AF_UNIX, or in the future
-                      * AF_INET6 */
-  tor_addr_t addr; /**< IP of the other side of the connection; used to
-                    * identify routers, along with port. */
-  uint16_t port; /**< If non-zero, port on the other end
-                  * of the connection. */
+                      * AF_INET, but it can also be AF_UNIX, or AF_INET6 */
+  tor_addr_t addr; /**< IP that socket "s" is directly connected to;
+                    * may be the IP address for a proxy or pluggable transport,
+                    * see "address" for the address of the final destination.
+                    */
+  uint16_t port; /**< If non-zero, port that socket "s" is directly connected
+                  * to; may be the port for a proxy or pluggable transport,
+                  * see "address" for the port at the final destination. */
   uint16_t marked_for_close; /**< Should we close this conn on the next
                               * iteration of the main loop? (If true, holds
                               * the line number where this connection was
                               * marked.) */
   const char *marked_for_close_file; /**< For debugging: in which file were
                                       * we marked for close? */
-  char *address; /**< FQDN (or IP) of the other end.
+  char *address; /**< FQDN (or IP) and port of the final destination for this
+                  * connection; this is always the remote address, it is
+                  * passed to a proxy or pluggable transport if one in use.
+                  * See "addr" and "port" for the address that socket "s" is
+                  * directly connected to.
                   * strdup into this, because free_connection() frees it. */
   /** Another connection that's connected to this one in lieu of a socket. */
   struct connection_t *linked_conn;
@@ -2215,7 +2220,7 @@ typedef struct routerstatus_t {
   /** Digest of the router's most recent descriptor or microdescriptor.
    * If it's a descriptor, we only use the first DIGEST_LEN bytes. */
   char descriptor_digest[DIGEST256_LEN];
-  uint32_t addr; /**< IPv4 address for this router. */
+  uint32_t addr; /**< IPv4 address for this router, in host order. */
   uint16_t or_port; /**< OR port for this router. */
   uint16_t dir_port; /**< Directory port for this router. */
   tor_addr_t ipv6_addr; /**< IPv6 address for this router. */
@@ -4188,7 +4193,7 @@ typedef struct {
    * This schedule is incremented by (potentially concurrent) connection
    * attempts, unlike other schedules, which are incremented by connection
    * failures.  Only altered on testing networks. */
-  smartlist_t *TestingClientBootstrapConsensusAuthorityDownloadSchedule;
+  smartlist_t *ClientBootstrapConsensusAuthorityDownloadSchedule;
 
   /** Schedule for when clients should download consensuses from fallback
    * directory mirrors if they are bootstrapping (that is, they don't have a
@@ -4198,7 +4203,7 @@ typedef struct {
    * This schedule is incremented by (potentially concurrent) connection
    * attempts, unlike other schedules, which are incremented by connection
    * failures.  Only altered on testing networks. */
-  smartlist_t *TestingClientBootstrapConsensusFallbackDownloadSchedule;
+  smartlist_t *ClientBootstrapConsensusFallbackDownloadSchedule;
 
   /** Schedule for when clients should download consensuses from authorities
    * if they are bootstrapping (that is, they don't have a usable, reasonably
@@ -4208,7 +4213,7 @@ typedef struct {
    * This schedule is incremented by (potentially concurrent) connection
    * attempts, unlike other schedules, which are incremented by connection
    * failures.  Only altered on testing networks. */
-  smartlist_t *TestingClientBootstrapConsensusAuthorityOnlyDownloadSchedule;
+  smartlist_t *ClientBootstrapConsensusAuthorityOnlyDownloadSchedule;
 
   /** Schedule for when clients should download bridge descriptors.  Only
    * altered on testing networks. */
@@ -4230,17 +4235,17 @@ typedef struct {
   /** How many times will a client try to fetch a consensus while
    * bootstrapping using a list of fallback directories, before it gives up?
    * Only altered on testing networks. */
-  int TestingClientBootstrapConsensusMaxDownloadTries;
+  int ClientBootstrapConsensusMaxDownloadTries;
 
   /** How many times will a client try to fetch a consensus while
    * bootstrapping using only a list of authorities, before it gives up?
    * Only altered on testing networks. */
-  int TestingClientBootstrapConsensusAuthorityOnlyMaxDownloadTries;
+  int ClientBootstrapConsensusAuthorityOnlyMaxDownloadTries;
 
   /** How many simultaneous in-progress connections will we make when trying
    * to fetch a consensus before we wait for one to complete, timeout, or
    * error out?  Only altered on testing networks. */
-  int TestingClientBootstrapConsensusMaxInProgressTries;
+  int ClientBootstrapConsensusMaxInProgressTries;
 
   /** How many times will we try to download a router's descriptor before
    * giving up?  Only altered on testing networks. */
@@ -5034,7 +5039,7 @@ typedef enum {
 /** Hidden-service side configuration of client authorization. */
 typedef struct rend_authorized_client_t {
   char *client_name;
-  char descriptor_cookie[REND_DESC_COOKIE_LEN];
+  uint8_t descriptor_cookie[REND_DESC_COOKIE_LEN];
   crypto_pk_t *client_key;
 } rend_authorized_client_t;
 

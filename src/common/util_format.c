@@ -506,7 +506,7 @@ hex_decode_digit(char c)
 
 /** Given a hexadecimal string of <b>srclen</b> bytes in <b>src</b>, decode it
  * and store the result in the <b>destlen</b>-byte buffer at <b>dest</b>.
- * Return 0 on success, -1 on failure. */
+ * Return the number of bytes decoded on success, -1 on failure. */
 int
 base16_decode(char *dest, size_t destlen, const char *src, size_t srclen)
 {

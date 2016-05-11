@@ -2360,7 +2360,7 @@ guardfraction_file_parse_guard_line(const char *guard_line,
 
   inputs_tmp = smartlist_get(sl, 0);
   if (strlen(inputs_tmp) != HEX_DIGEST_LEN ||
-      base16_decode(guard_id, DIGEST_LEN, inputs_tmp, HEX_DIGEST_LEN) < 0) {
+      base16_decode(guard_id, DIGEST_LEN, inputs_tmp, HEX_DIGEST_LEN) != DIGEST_LEN) {
     tor_asprintf(err_msg, "bad digest '%s'", inputs_tmp);
     goto done;
   }

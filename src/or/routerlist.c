@@ -2688,7 +2688,8 @@ hex_digest_nickname_decode(const char *hexdigest,
     return -1;
   }
 
-  if (base16_decode(digest_out, DIGEST_LEN, hexdigest, HEX_DIGEST_LEN)<0)
+  if (base16_decode(digest_out, DIGEST_LEN, hexdigest, HEX_DIGEST_LEN)
+          < DIGEST_LEN)
     return -1;
   return 0;
 }
@@ -2773,7 +2774,7 @@ hexdigest_to_digest(const char *hexdigest, char *digest)
   if (hexdigest[0]=='$')
     ++hexdigest;
   if (strlen(hexdigest) < HEX_DIGEST_LEN ||
-      base16_decode(digest,DIGEST_LEN,hexdigest,HEX_DIGEST_LEN) < 0)
+      base16_decode(digest,DIGEST_LEN,hexdigest,HEX_DIGEST_LEN) < DIGEST_LEN)
     return -1;
   return 0;
 }

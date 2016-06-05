@@ -1595,8 +1595,11 @@ router_parse_entry_from_string(const char *s, const char *end,
   if ((tok = find_opt_by_keyword(tokens, K_EXTRA_INFO_DIGEST))) {
     tor_assert(tok->n_args >= 1);
     if (strlen(tok->args[0]) == HEX_DIGEST_LEN) {
-      base16_decode(router->cache_info.extra_info_digest,
-                    DIGEST_LEN, tok->args[0], HEX_DIGEST_LEN);
+      if (base16_decode(router->cache_info.extra_info_digest,
+                        DIGEST_LEN, tok->args[0], HEX_DIGEST_LEN)
+              != DIGEST_LEN) {
+          log_warn(LD_DIR,"Invalid extra info digest");
+      }
     } else {
       log_warn(LD_DIR, "Invalid extra info digest %s", escaped(tok->args[0]));
     }
@@ -3548,7 +3551,7 @@ networkstatus_parse_detached_signatures(const char *s, const char *eos)
       continue;
     }
     if (base16_decode(digests->d[alg], digest_length,
-                      hexdigest, strlen(hexdigest)) < digest_length) {
+                      hexdigest, strlen(hexdigest)) < (int)digest_length) {
       log_warn(LD_DIR, "Bad encoding on consensus-digest in detached "
                "networkstatus signatures");
       goto err;

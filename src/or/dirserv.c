@@ -203,7 +203,7 @@ dirserv_load_fingerprint_file(void)
     tor_strstrip(fingerprint, " "); /* remove spaces */
     if (strlen(fingerprint) != HEX_DIGEST_LEN ||
         base16_decode(digest_tmp, sizeof(digest_tmp),
-                      fingerprint, HEX_DIGEST_LEN) < 0) {
+                      fingerprint, HEX_DIGEST_LEN) < DIGEST_LEN) {
       log_notice(LD_CONFIG,
                  "Invalid fingerprint (nickname '%s', "
                  "fingerprint %s). Skipping.",
@@ -2278,7 +2278,8 @@ guardfraction_file_parse_guard_line(const char *guard_line,
 
   inputs_tmp = smartlist_get(sl, 0);
   if (strlen(inputs_tmp) != HEX_DIGEST_LEN ||
-      base16_decode(guard_id, DIGEST_LEN, inputs_tmp, HEX_DIGEST_LEN) != DIGEST_LEN) {
+      base16_decode(guard_id, DIGEST_LEN, inputs_tmp, HEX_DIGEST_LEN)
+            != DIGEST_LEN) {
     tor_asprintf(err_msg, "bad digest '%s'", inputs_tmp);
     goto done;
   }
@@ -2583,7 +2584,7 @@ measured_bw_line_parse(measured_bw_line_t *out, const char *orig_line)
 
       if (strlen(cp) != HEX_DIGEST_LEN ||
           base16_decode(out->node_id, DIGEST_LEN,
-              cp, HEX_DIGEST_LEN) != DIGEST_LEN) {
+                        cp, HEX_DIGEST_LEN) != DIGEST_LEN) {
         log_warn(LD_DIRSERV, "Invalid node_id in bandwidth file line: %s",
                  escaped(orig_line));
         tor_free(line);

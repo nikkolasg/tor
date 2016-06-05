@@ -30,11 +30,8 @@ fi
 # the += operator on it in src/or/Makefile.am
 CPPFLAGS="$CPPFLAGS -I\${top_srcdir}/src/common"
 
-#XXXX020 We should make these enabled or not, before 0.2.0.x-final
 AC_ARG_ENABLE(openbsd-malloc,
    AS_HELP_STRING(--enable-openbsd-malloc, [use malloc code from OpenBSD.  Linux only]))
-AC_ARG_ENABLE(instrument-downloads,
-   AS_HELP_STRING(--enable-instrument-downloads, [instrument downloads of directory resources etc.]))
 AC_ARG_ENABLE(static-openssl,
    AS_HELP_STRING(--enable-static-openssl, [link against a static openssl library. Requires --with-openssl-dir]))
 AC_ARG_ENABLE(static-libevent,
@@ -73,10 +70,6 @@ if test "$enable_system_torrc" = "no"; then
 fi
 
 AM_CONDITIONAL(USE_OPENBSD_MALLOC, test "x$enable_openbsd_malloc" = "xyes")
-if test "x$enable_instrument_downloads" = "xyes"; then
-  AC_DEFINE(INSTRUMENT_DOWNLOADS, 1,
-            [Defined if we want to keep track of how much of each kind of resource we download.])
-fi
 
 AC_ARG_ENABLE(transparent,
      AS_HELP_STRING(--disable-transparent, [disable transparent proxy support]),
@@ -143,9 +136,11 @@ case "$host" in
 esac
 
 AC_ARG_ENABLE(gcc-warnings,
-     AS_HELP_STRING(--enable-gcc-warnings, [enable verbose warnings]))
+     AS_HELP_STRING(--enable-gcc-warnings, [deprecated alias for enable-fatal-warnings]))
+AC_ARG_ENABLE(fatal-warnings,
+     AS_HELP_STRING(--enable-fatal-warnings, [tell the compiler to treat all warnings as errors.]))
 AC_ARG_ENABLE(gcc-warnings-advisory,
-     AS_HELP_STRING(--enable-gcc-warnings-advisory, [enable verbose warnings, excluding -Werror]))
+     AS_HELP_STRING(--disable-gcc-warnings-advisory, [disable the regular verbose warnings]))
 
 dnl Others suggest '/gs /safeseh /nxcompat /dynamicbase' for non-gcc on Windows
 AC_ARG_ENABLE(gcc-hardening,
@@ -432,6 +427,7 @@ AC_CHECK_FUNCS(
         strtoull \
         sysconf \
 	sysctl \
+	truncate \
         uname \
 	usleep \
         vasprintf \
@@ -755,13 +751,18 @@ dnl use it with a build of a library.
 all_ldflags_for_check="$TOR_LDFLAGS_zlib $TOR_LDFLAGS_openssl $TOR_LDFLAGS_libevent"
 all_libs_for_check="$TOR_ZLIB_LIBS $TOR_LIB_MATH $TOR_LIBEVENT_LIBS $TOR_OPENSSL_LIBS $TOR_SYSTEMD_LIBS $TOR_LIB_WS32 $TOR_LIB_GDI $TOR_CAP_LIBS"
 
+CFLAGS_FTRAPV=
+CFLAGS_FWRAPV=
+CFLAGS_ASAN=
+CFLAGS_UBSAN=
+
 AC_COMPILE_IFELSE([AC_LANG_PROGRAM([], [
 #if !defined(__clang__)
 #error
 #endif])], have_clang=yes, have_clang=no)
 
 if test "x$enable_gcc_hardening" != "xno"; then
-    CFLAGS="$CFLAGS -D_FORTIFY_SOURCE=2"
+    CFLAGS="$CFLAGS -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2"
     if test "x$have_clang" = "xyes"; then
         TOR_CHECK_CFLAGS(-Qunused-arguments)
     fi
@@ -777,19 +778,87 @@ m4_ifdef([AS_VAR_IF],[
     AS_VAR_POPDEF([can_link])
     AS_VAR_POPDEF([can_compile])
     TOR_CHECK_CFLAGS(-Wstack-protector)
-    TOR_CHECK_CFLAGS(-fwrapv)
     TOR_CHECK_CFLAGS(--param ssp-buffer-size=1)
     if test "$bwin32" = "false"; then
        TOR_CHECK_CFLAGS(-fPIE)
        TOR_CHECK_LDFLAGS(-pie, "$all_ldflags_for_check", "$all_libs_for_check")
     fi
+    TOR_TRY_COMPILE_WITH_CFLAGS(-ftrapv, also_link, CFLAGS_FTRAPV="-ftrapv", true)
+    TOR_TRY_COMPILE_WITH_CFLAGS(-fwrapv, also_link, CFLAGS_FWRAPV="-fwrapv", true)
+    if test "$tor_cv_cflags__ftrapv" = "yes" && test "$tor_can_link__ftrapv" != "yes"; then
+      AC_MSG_WARN([The compiler supports -ftrapv, but for some reason I was not able to link with -ftrapv. Are you missing run-time support? Run-time hardening will not work as well as it should.])
+    fi
 fi
 
 if test "x$enable_expensive_hardening" = "xyes"; then
-   TOR_CHECK_CFLAGS([-fsanitize=address])
-   TOR_CHECK_CFLAGS([-fsanitize=undefined])
-   TOR_CHECK_CFLAGS([-fno-omit-frame-pointer])
+   if test "$tor_cv_cflags__ftrapv" != "yes"; then
+     AC_MSG_ERROR([You requested expensive hardening, but the compiler does not seem to support -ftrapv.])
+   fi
+
+   TOR_TRY_COMPILE_WITH_CFLAGS([-fsanitize=address], also_link, CFLAGS_ASAN="-fsanitize=address", true)
+    if test "$tor_cv_cflags__fsanitize_address" = "yes" && test "$tor_can_link__fsanitize_address" != "yes"; then
+      AC_MSG_ERROR([The compiler supports -fsanitize=address, but for some reason I was not able to link when using it. Are you missing run-time support? With GCC you need libubsan.so, and with Clang you need libclang_rt.ubsan*])
+    fi
+
+   TOR_TRY_COMPILE_WITH_CFLAGS([-fsanitize=undefined], also_link, CFLAGS_UBSAN="-fsanitize=undefined", true)
+    if test "$tor_cv_cflags__fsanitize_address" = "yes" && test "$tor_can_link__fsanitize_address" != "yes"; then
+      AC_MSG_ERROR([The compiler supports -fsanitize=undefined, but for some reason I was not able to link when using it. Are you missing run-time support? With GCC you need libasan.so, and with Clang you need libclang_rt.ubsan*])
+    fi
+
+TOR_CHECK_CFLAGS([-fno-omit-frame-pointer])
 fi
+
+CFLAGS_BUGTRAP="$CFLAGS_FTRAPV $CFLAGS_ASAN $CFLAGS_UBSAN"
+CFLAGS_CONSTTIME="$CFLAGS_FWRAPV"
+
+mulodi_fixes_ftrapv=no
+if test "$have_clang" = "yes"; then
+  saved_CFLAGS="$CFLAGS"
+  CFLAGS="$CFLAGS $CFLAGS_FTRAPV"
+  AC_MSG_CHECKING([whether clang -ftrapv can link a 64-bit int multiply])
+  AC_LINK_IFELSE([
+      AC_LANG_SOURCE([[
+          #include <stdint.h>
+          #include <stdlib.h>
+	  int main(int argc, char **argv)
+	  {
+            int64_t x = ((int64_t)atoi(argv[1])) * (int64_t)atoi(argv[2])
+	                * (int64_t)atoi(argv[3]);
+	    return x == 9;
+	  } ]])],
+	  [ftrapv_can_link=yes; AC_MSG_RESULT([yes])],
+	  [ftrapv_can_link=no; AC_MSG_RESULT([no])])
+  if test "$ftrapv_can_link" = "no"; then
+    AC_MSG_CHECKING([whether defining __mulodi4 fixes that])
+    AC_LINK_IFELSE([
+      AC_LANG_SOURCE([[
+          #include <stdint.h>
+          #include <stdlib.h>
+	  int64_t __mulodi4(int64_t a, int64_t b, int *overflow) {
+             *overflow=0;
+	     return a;
+          }
+	  int main(int argc, char **argv)
+	  {
+            int64_t x = ((int64_t)atoi(argv[1])) * (int64_t)atoi(argv[2])
+	                * (int64_t)atoi(argv[3]);
+	    return x == 9;
+	  } ]])],
+	  [mulodi_fixes_ftrapv=yes; AC_MSG_RESULT([yes])],
+	  [mulodi_fixes_ftrapv=no; AC_MSG_RESULT([no])])
+  fi
+  CFLAGS="$saved_CFLAGS"
+fi
+
+AM_CONDITIONAL(ADD_MULODI4, test "$mulodi_fixes_ftrapv" = "yes")
+
+dnl These cflags add bunches of branches, and we haven't been able to
+dnl persuade ourselves that they're suitable for code that needs to be
+dnl constant time.
+AC_SUBST(CFLAGS_BUGTRAP)
+dnl These cflags are variant ones sutable for code that needs to be
+dnl constant-time.
+AC_SUBST(CFLAGS_CONSTTIME)
 
 if test "x$enable_linker_hardening" != "xno"; then
     TOR_CHECK_LDFLAGS(-z relro -z now, "$all_ldflags_for_check", "$all_libs_for_check")
@@ -833,6 +902,7 @@ dnl Check for libscrypt
 if test "x$enable_libscrypt" != "xno"; then
   AC_CHECK_HEADERS([libscrypt.h])
   AC_SEARCH_LIBS(libscrypt_scrypt, [scrypt])
+  AC_CHECK_FUNCS([libscrypt_scrypt])
 fi
 
 dnl ============================================================
@@ -942,64 +1012,57 @@ AC_SUBST(CURVE25519_LIBS)
 dnl Make sure to enable support for large off_t if available.
 AC_SYS_LARGEFILE
 
-AC_CHECK_HEADERS(
-        assert.h \
-        errno.h \
-        fcntl.h \
-        signal.h \
-        string.h \
-	sys/capability.h \
-        sys/fcntl.h \
-        sys/stat.h \
-        sys/time.h \
-        sys/types.h \
-        time.h \
-        unistd.h
- , , AC_MSG_WARN(Some headers were not found, compilation may fail.  If compilation succeeds, please send your orconfig.h to the developers so we can fix this warning.))
-
-dnl These headers are not essential
-
-AC_CHECK_HEADERS(
-        arpa/inet.h \
-        crt_externs.h \
-        execinfo.h \
-        grp.h \
-        ifaddrs.h \
-        inttypes.h \
-        limits.h \
-        linux/types.h \
-        machine/limits.h \
-        malloc.h \
-        malloc/malloc.h \
-        malloc_np.h \
-        netdb.h \
-        netinet/in.h \
-        netinet/in6.h \
-        pwd.h \
-	readpassphrase.h \
-        stdint.h \
-	sys/eventfd.h \
-        sys/file.h \
-        sys/ioctl.h \
-        sys/limits.h \
-        sys/mman.h \
-        sys/param.h \
-        sys/prctl.h \
-        sys/resource.h \
-        sys/select.h \
-        sys/socket.h \
-	sys/statvfs.h \
-        sys/syscall.h \
-	sys/sysctl.h \
-        sys/syslimits.h \
-        sys/time.h \
-        sys/types.h \
-        sys/un.h \
-        sys/utime.h \
-        sys/wait.h \
-        syslog.h \
-        utime.h
-)
+AC_CHECK_HEADERS([assert.h \
+                  errno.h \
+                  fcntl.h \
+                  signal.h \
+                  string.h \
+                  sys/capability.h \
+                  sys/fcntl.h \
+                  sys/stat.h \
+                  sys/time.h \
+                  sys/types.h \
+                  time.h \
+                  unistd.h \
+                  arpa/inet.h \
+                  crt_externs.h \
+                  execinfo.h \
+                  grp.h \
+                  ifaddrs.h \
+                  inttypes.h \
+                  limits.h \
+                  linux/types.h \
+                  machine/limits.h \
+                  malloc.h \
+                  malloc/malloc.h \
+                  malloc_np.h \
+                  netdb.h \
+                  netinet/in.h \
+                  netinet/in6.h \
+                  pwd.h \
+                  readpassphrase.h \
+                  stdint.h \
+                  sys/eventfd.h \
+                  sys/file.h \
+                  sys/ioctl.h \
+                  sys/limits.h \
+                  sys/mman.h \
+                  sys/param.h \
+                  sys/prctl.h \
+                  sys/resource.h \
+                  sys/select.h \
+                  sys/socket.h \
+                  sys/statvfs.h \
+                  sys/syscall.h \
+                  sys/sysctl.h \
+                  sys/syslimits.h \
+                  sys/time.h \
+                  sys/types.h \
+                  sys/un.h \
+                  sys/utime.h \
+                  sys/wait.h \
+                  syslog.h \
+                  utime.h])
 
 AC_CHECK_HEADERS(sys/param.h)
 
@@ -1576,6 +1639,12 @@ else
   enable_gcc_warnings_advisory=no
 fi
 
+# Warnings implies advisory-warnings and -Werror.
+if test "$enable_gcc_warnings" = "yes"; then
+  enable_gcc_warnings_advisory=yes
+  enable_fatal_warnings=yes
+fi
+
 # OS X Lion started deprecating the system openssl. Let's just disable
 # all deprecation warnings on OS X. Also, to potentially make the binary
 # a little smaller, let's enable dead_strip.
@@ -1588,8 +1657,7 @@ esac
 
 # Add some more warnings which we use in development but not in the
 # released versions.  (Some relevant gcc versions can't handle these.)
-if test "x$enable_gcc_warnings" = "xyes" ||
-  test "x$enable_gcc_warnings_advisory" = "xyes"; then
+if test "x$enable_gcc_warnings_advisory" != "xno"; then
 
   AC_COMPILE_IFELSE([AC_LANG_PROGRAM([], [
 #if !defined(__GNUC__) || (__GNUC__ < 4)
@@ -1610,7 +1678,6 @@ if test "x$enable_gcc_warnings" = "xyes" ||
 #if !defined(__GNUC__) || (__GNUC__ < 4) || (__GNUC__ == 4 && __GNUC_MINOR__ < 6)
 #error
 #endif])], have_gcc46=yes, have_gcc46=no)
-
 
   save_CFLAGS="$CFLAGS"
   CFLAGS="$CFLAGS -Wshorten-64-to-32"
@@ -1633,10 +1700,6 @@ if test "x$enable_gcc_warnings" = "xyes" ||
   CFLAGS="$CFLAGS -Wwrite-strings -Wmissing-declarations -Wredundant-decls"
   CFLAGS="$CFLAGS -Wnested-externs -Wbad-function-cast -Wswitch-enum"
 
-  if test "x$enable_gcc_warnings" = "xyes"; then
-    CFLAGS="$CFLAGS -Werror"
-  fi
-
   # Disabled, so we can use mallinfo(): -Waggregate-return
 
   if test "x$have_gcc4" = "xyes"; then
@@ -1646,7 +1709,6 @@ if test "x$enable_gcc_warnings" = "xyes" ||
 
   if test "x$have_gcc42" = "xyes"; then
     # These warnings break gcc 4.0.2 and work on gcc 4.2
-    # XXXX020 See if any of these work with earlier versions.
     CFLAGS="$CFLAGS -Waddress -Wmissing-noreturn -Wstrict-overflow=1"
 
     # We used to use -Wstrict-overflow=5, but that breaks us heavily under 4.3.
@@ -1659,7 +1721,6 @@ if test "x$enable_gcc_warnings" = "xyes" ||
 
   if test "x$have_gcc43" = "xyes"; then
     # These warnings break gcc 4.2 and work on gcc 4.3
-    # XXXX020 See if any of these work with earlier versions.
     CFLAGS="$CFLAGS -Wextra -Warray-bounds"
   fi
 
@@ -1673,7 +1734,11 @@ if test "x$enable_gcc_warnings" = "xyes" ||
     CFLAGS="$CFLAGS -Wshorten-64-to-32"
   fi
 
-
+  if test "x$enable_fatal_warnings" = "xyes"; then
+    # I'd like to use TOR_CHECK_CFLAGS here, but I can't, since the
+    # default autoconf programs are full of errors.
+    CFLAGS="$CFLAGS -Werror"
+  fi
 
 ##This will break the world on some 64-bit architectures
 # CFLAGS="$CFLAGS -Winline"

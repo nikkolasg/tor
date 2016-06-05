@@ -80,7 +80,6 @@ static void dir_routerdesc_download_failed(smartlist_t *failed,
                                            int was_descriptor_digests);
 static void dir_microdesc_download_failed(smartlist_t *failed,
                                           int status_code);
-static void note_client_request(int purpose, int compressed, size_t bytes);
 static int client_likes_consensus(networkstatus_t *v, const char *want_url);
 
 static void directory_initiate_command_rend(
@@ -95,6 +94,9 @@ static void directory_initiate_command_rend(
                                           size_t payload_len,
                                           time_t if_modified_since,
                                           const rend_data_t *rend_query);
+
+static void connection_dir_close_consensus_fetches(
+                   dir_connection_t *except_this_one, const char *resource);
 
 /********* START VARIABLES **********/
 
@@ -492,8 +494,9 @@ MOCK_IMPL(void, directory_get_from_dirserver, (
        * sort of dir fetch we'll be doing, so it won't return a bridge
        * that can't answer our question.
        */
-      /* XXX024 Not all bridges handle conditional consensus downloading,
-       * so, for now, never assume the server supports that. -PP */
+      /* XXX+++++ Not all bridges handle conditional consensus downloading,
+       * so, for now, never assume the server supports that. -PP
+       * Is that assumption still so in 2016? -NM */
       const node_t *node = choose_random_dirguard(type);
       if (node && node->ri) {
         /* every bridge has a routerinfo. */
@@ -630,7 +633,7 @@ directory_choose_address_routerstatus(const routerstatus_t *status,
   tor_assert(use_or_ap != NULL);
   tor_assert(use_dir_ap != NULL);
 
-  const int anonymized_connection = dirind_is_anon(indirection);
+  const or_options_t *options = get_options();
   int have_or = 0, have_dir = 0;
 
   /* We expect status to have at least one reachable address if we're
@@ -652,13 +655,16 @@ directory_choose_address_routerstatus(const routerstatus_t *status,
   tor_addr_make_null(&use_dir_ap->addr, AF_UNSPEC);
   use_dir_ap->port = 0;
 
-  if (anonymized_connection) {
-    /* Use the primary (IPv4) OR address if we're making an indirect
-     * connection. */
-    tor_addr_from_ipv4h(&use_or_ap->addr, status->addr);
-    use_or_ap->port = status->or_port;
-    have_or = 1;
-  } else {
+  /* ORPort connections */
+  if (indirection == DIRIND_ANONYMOUS) {
+    if (status->addr) {
+      /* Since we're going to build a 3-hop circuit and ask the 2nd relay
+       * to extend to this address, always use the primary (IPv4) OR address */
+      tor_addr_from_ipv4h(&use_or_ap->addr, status->addr);
+      use_or_ap->port = status->or_port;
+      have_or = 1;
+    }
+  } else if (indirection == DIRIND_ONEHOP) {
     /* We use an IPv6 address if we have one and we prefer it.
      * Use the preferred address and port if they are reachable, otherwise,
      * use the alternate address and port (if any).
@@ -668,9 +674,16 @@ directory_choose_address_routerstatus(const routerstatus_t *status,
                                                  use_or_ap);
   }
 
-  have_dir = fascist_firewall_choose_address_rs(status,
-                                                FIREWALL_DIR_CONNECTION, 0,
-                                                use_dir_ap);
+  /* DirPort connections
+   * DIRIND_ONEHOP uses ORPort, but may fall back to the DirPort on relays */
+  if (indirection == DIRIND_DIRECT_CONN ||
+      indirection == DIRIND_ANON_DIRPORT ||
+      (indirection == DIRIND_ONEHOP
+       && !directory_must_use_begindir(options))) {
+    have_dir = fascist_firewall_choose_address_rs(status,
+                                                  FIREWALL_DIR_CONNECTION, 0,
+                                                  use_dir_ap);
+  }
 
   /* We rejected all addresses in the relay's status. This means we can't
    * connect to it. */
@@ -956,6 +969,16 @@ connection_dir_download_cert_failed(dir_connection_t *conn, int status)
   update_certificate_downloads(time(NULL));
 }
 
+/* Should this tor instance only use begindir for all its directory requests?
+ */
+int
+directory_must_use_begindir(const or_options_t *options)
+{
+  /* Clients, onion services, and bridges must use begindir,
+   * relays and authorities do not have to */
+  return !public_server_mode(options);
+}
+
 /** Evaluate the situation and decide if we should use an encrypted
  * "begindir-style" connection for this directory request.
  * 1) If or_port is 0, or it's a direct conn and or_port is firewalled
@@ -963,23 +986,48 @@ connection_dir_download_cert_failed(dir_connection_t *conn, int status)
  * 2) If we prefer to avoid begindir conns, and we're not fetching or
  *    publishing a bridge relay descriptor, no.
  * 3) Else yes.
+ * If returning 0, return in *reason why we can't use begindir.
+ * reason must not be NULL.
  */
 static int
 directory_command_should_use_begindir(const or_options_t *options,
                                       const tor_addr_t *addr,
                                       int or_port, uint8_t router_purpose,
-                                      dir_indirection_t indirection)
+                                      dir_indirection_t indirection,
+                                      const char **reason)
 {
   (void) router_purpose;
-  if (!or_port)
+  tor_assert(reason);
+  *reason = NULL;
+
+  /* Reasons why we can't possibly use begindir */
+  if (!or_port) {
+    *reason = "directory with unknown ORPort";
     return 0; /* We don't know an ORPort -- no chance. */
-  if (indirection == DIRIND_DIRECT_CONN || indirection == DIRIND_ANON_DIRPORT)
+  }
+  if (indirection == DIRIND_DIRECT_CONN ||
+      indirection == DIRIND_ANON_DIRPORT) {
+    *reason = "DirPort connection";
     return 0;
-  if (indirection == DIRIND_ONEHOP)
+  }
+  if (indirection == DIRIND_ONEHOP) {
+    /* We're firewalled and want a direct OR connection */
     if (!fascist_firewall_allows_address_addr(addr, or_port,
-                                              FIREWALL_OR_CONNECTION, 0, 0) ||
-        directory_fetches_from_authorities(options))
-      return 0; /* We're firewalled or are acting like a relay -- also no. */
+                                              FIREWALL_OR_CONNECTION, 0, 0)) {
+      *reason = "ORPort not reachable";
+      return 0;
+    }
+  }
+  /* Reasons why we want to avoid using begindir */
+  if (indirection == DIRIND_ONEHOP) {
+    if (!directory_must_use_begindir(options)) {
+      *reason = "in relay mode";
+      return 0;
+    }
+  }
+  /* DIRIND_ONEHOP on a client, or DIRIND_ANONYMOUS
+   */
+  *reason = "(using begindir)";
   return 1;
 }
 
@@ -1062,11 +1110,13 @@ directory_initiate_command_rend(const tor_addr_port_t *or_addr_port,
   dir_connection_t *conn;
   const or_options_t *options = get_options();
   int socket_error = 0;
+  const char *begindir_reason = NULL;
   /* Should the connection be to a relay's OR port (and inside that we will
    * send our directory request)? */
   const int use_begindir = directory_command_should_use_begindir(options,
                                      &or_addr_port->addr, or_addr_port->port,
-                                     router_purpose, indirection);
+                                     router_purpose, indirection,
+                                     &begindir_reason);
   /* Will the connection go via a three-hop Tor circuit? Note that this
    * is separate from whether it will use_begindir. */
   const int anonymized_connection = dirind_is_anon(indirection);
@@ -1092,6 +1142,14 @@ directory_initiate_command_rend(const tor_addr_port_t *or_addr_port,
   (void)is_sensitive_dir_purpose;
 #endif
 
+  /* use encrypted begindir connections for everything except relays
+   * this provides better protection for directory fetches */
+  if (!use_begindir && directory_must_use_begindir(options)) {
+    log_warn(LD_BUG, "Client could not use begindir connection: %s",
+             begindir_reason ? begindir_reason : "(NULL)");
+    return;
+  }
+
   /* ensure that we don't make direct connections when a SOCKS server is
    * configured. */
   if (!anonymized_connection && !use_begindir && !options->HTTPProxy &&
@@ -1112,12 +1170,6 @@ directory_initiate_command_rend(const tor_addr_port_t *or_addr_port,
       log_backtrace(LOG_INFO, LD_BUG, "Address came from");
       logged_backtrace = 1;
     }
-    return;
-  }
-
-  /* ensure we don't make excess connections when we're already downloading
-   * a consensus during bootstrap */
-  if (connection_dir_avoid_extra_connection_for_purpose(dir_purpose)) {
     return;
   }
 
@@ -1161,11 +1213,6 @@ directory_initiate_command_rend(const tor_addr_port_t *or_addr_port,
         conn->base_.state = DIR_CONN_STATE_CLIENT_SENDING;
         /* fall through */
       case 0:
-        /* Close this connection if there's another consensus connection
-         * downloading (during bootstrap), or connecting (after bootstrap). */
-        if (connection_dir_close_consensus_conn_if_extra(conn)) {
-          return;
-        }
         /* queue the command on the outbuf */
         directory_send_command(conn, dir_purpose, 1, resource,
                                payload, payload_len,
@@ -1211,11 +1258,6 @@ directory_initiate_command_rend(const tor_addr_port_t *or_addr_port,
     if (connection_add(TO_CONN(conn)) < 0) {
       log_warn(LD_NET,"Unable to add connection for link to dirserver.");
       connection_mark_for_close(TO_CONN(conn));
-      return;
-    }
-    /* Close this connection if there's another consensus connection
-     * downloading (during bootstrap), or connecting (after bootstrap). */
-    if (connection_dir_close_consensus_conn_if_extra(conn)) {
       return;
     }
     conn->base_.state = DIR_CONN_STATE_CLIENT_SENDING;
@@ -1797,7 +1839,7 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
   char *body;
   char *headers;
   char *reason = NULL;
-  size_t body_len = 0, orig_len = 0;
+  size_t body_len = 0;
   int status_code;
   time_t date_header = 0;
   long apparent_skew;
@@ -1807,7 +1849,6 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
   int allow_partial = (conn->base_.purpose == DIR_PURPOSE_FETCH_SERVERDESC ||
                        conn->base_.purpose == DIR_PURPOSE_FETCH_EXTRAINFO ||
                        conn->base_.purpose == DIR_PURPOSE_FETCH_MICRODESC);
-  int was_compressed = 0;
   time_t now = time(NULL);
   int src_code;
 
@@ -1826,7 +1867,6 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
       return -1;
     /* case 1, fall through */
   }
-  orig_len = body_len;
 
   if (parse_http_response(headers, &status_code, &date_header,
                           &compression, &reason) < 0) {
@@ -1944,7 +1984,6 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
       tor_free(body);
       body = new_body;
       body_len = new_len;
-      was_compressed = 1;
     }
   }
 
@@ -1964,7 +2003,8 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
     }
     log_info(LD_DIR,"Received consensus directory (size %d) from server "
              "'%s:%d'", (int)body_len, conn->base_.address, conn->base_.port);
-    if ((r=networkstatus_set_current_consensus(body, flavname, 0))<0) {
+    if ((r=networkstatus_set_current_consensus(body, flavname, 0,
+                                               conn->identity_digest))<0) {
       log_fn(r<-1?LOG_WARN:LOG_INFO, LD_DIR,
              "Unable to load %s consensus directory downloaded from "
              "server '%s:%d'. I'll try again soon.",
@@ -1973,6 +2013,10 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
       networkstatus_consensus_download_failed(0, flavname);
       return -1;
     }
+
+    /* If we launched other fetches for this consensus, cancel them. */
+    connection_dir_close_consensus_fetches(conn, flavname);
+
     /* launches router downloads as needed */
     routers_update_all_from_networkstatus(now, 3);
     update_microdescs_from_networkstatus(now);
@@ -2007,7 +2051,8 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
     }
 
     if (src_code != -1) {
-      if (trusted_dirs_load_certs_from_string(body, src_code, 1)<0) {
+      if (trusted_dirs_load_certs_from_string(body, src_code, 1,
+                                              conn->identity_digest)<0) {
         log_warn(LD_DIR, "Unable to parse fetched certificates");
         /* if we fetched more than one and only some failed, the successful
          * ones got flushed to disk so it's safe to call this on them */
@@ -2203,7 +2248,7 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
                        ds->nickname);
               /* XXXX use this information; be sure to upload next one
                * sooner. -NM */
-              /* XXXX023 On further thought, the task above implies that we're
+              /* XXXX++ On further thought, the task above implies that we're
                * basing our regenerate-descriptor time on when we uploaded the
                * last descriptor, not on the published time of the last
                * descriptor.  If those are different, that's a bad thing to
@@ -2404,7 +2449,6 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
         break;
     }
   }
-  note_client_request(conn->base_.purpose, was_compressed, orig_len);
   tor_free(body); tor_free(headers); tor_free(reason);
   return 0;
 }
@@ -2605,129 +2649,6 @@ write_http_response_header(dir_connection_t *conn, ssize_t length,
                              cache_lifetime);
 }
 
-#if defined(INSTRUMENT_DOWNLOADS) || defined(RUNNING_DOXYGEN)
-/* DOCDOC */
-typedef struct request_t {
-  uint64_t bytes; /**< How many bytes have we transferred? */
-  uint64_t count; /**< How many requests have we made? */
-} request_t;
-
-/** Map used to keep track of how much data we've up/downloaded in what kind
- * of request.  Maps from request type to pointer to request_t. */
-static strmap_t *request_map = NULL;
-
-/** Record that a client request of <b>purpose</b> was made, and that
- * <b>bytes</b> bytes of possibly <b>compressed</b> data were sent/received.
- * Used to keep track of how much we've up/downloaded in what kind of
- * request. */
-static void
-note_client_request(int purpose, int compressed, size_t bytes)
-{
-  char *key;
-  const char *kind = NULL;
-  switch (purpose) {
-    case DIR_PURPOSE_FETCH_CONSENSUS:     kind = "dl/consensus"; break;
-    case DIR_PURPOSE_FETCH_CERTIFICATE:   kind = "dl/cert"; break;
-    case DIR_PURPOSE_FETCH_STATUS_VOTE:   kind = "dl/vote"; break;
-    case DIR_PURPOSE_FETCH_DETACHED_SIGNATURES: kind = "dl/detached_sig";
-         break;
-    case DIR_PURPOSE_FETCH_SERVERDESC:    kind = "dl/server"; break;
-    case DIR_PURPOSE_FETCH_EXTRAINFO:     kind = "dl/extra"; break;
-    case DIR_PURPOSE_UPLOAD_DIR:          kind = "dl/ul-dir"; break;
-    case DIR_PURPOSE_UPLOAD_VOTE:         kind = "dl/ul-vote"; break;
-    case DIR_PURPOSE_UPLOAD_SIGNATURES:   kind = "dl/ul-sig"; break;
-    case DIR_PURPOSE_FETCH_RENDDESC_V2:   kind = "dl/rend2"; break;
-    case DIR_PURPOSE_UPLOAD_RENDDESC_V2:  kind = "dl/ul-rend2"; break;
-  }
-  if (kind) {
-    tor_asprintf(&key, "%s%s", kind, compressed?".z":"");
-  } else {
-    tor_asprintf(&key, "unknown purpose (%d)%s",
-                 purpose, compressed?".z":"");
-  }
-  note_request(key, bytes);
-  tor_free(key);
-}
-
-/** Helper: initialize the request map to instrument downloads. */
-static void
-ensure_request_map_initialized(void)
-{
-  if (!request_map)
-    request_map = strmap_new();
-}
-
-/** Called when we just transmitted or received <b>bytes</b> worth of data
- * because of a request of type <b>key</b> (an arbitrary identifier): adds
- * <b>bytes</b> to the total associated with key. */
-void
-note_request(const char *key, size_t bytes)
-{
-  request_t *r;
-  ensure_request_map_initialized();
-
-  r = strmap_get(request_map, key);
-  if (!r) {
-    r = tor_malloc_zero(sizeof(request_t));
-    strmap_set(request_map, key, r);
-  }
-  r->bytes += bytes;
-  r->count++;
-}
-
-/** Return a newly allocated string holding a summary of bytes used per
- * request type. */
-char *
-directory_dump_request_log(void)
-{
-  smartlist_t *lines;
-  char *result;
-  strmap_iter_t *iter;
-
-  ensure_request_map_initialized();
-
-  lines = smartlist_new();
-
-  for (iter = strmap_iter_init(request_map);
-       !strmap_iter_done(iter);
-       iter = strmap_iter_next(request_map, iter)) {
-    const char *key;
-    void *val;
-    request_t *r;
-    strmap_iter_get(iter, &key, &val);
-    r = val;
-    smartlist_add_asprintf(lines, "%s  "U64_FORMAT"  "U64_FORMAT"\n",
-                 key, U64_PRINTF_ARG(r->bytes), U64_PRINTF_ARG(r->count));
-  }
-  smartlist_sort_strings(lines);
-  result = smartlist_join_strings(lines, "", 0, NULL);
-  SMARTLIST_FOREACH(lines, char *, cp, tor_free(cp));
-  smartlist_free(lines);
-  return result;
-}
-#else
-static void
-note_client_request(int purpose, int compressed, size_t bytes)
-{
-  (void)purpose;
-  (void)compressed;
-  (void)bytes;
-}
-
-void
-note_request(const char *key, size_t bytes)
-{
-  (void)key;
-  (void)bytes;
-}
-
-char *
-directory_dump_request_log(void)
-{
-  return tor_strdup("Not supported.");
-}
-#endif
-
 /** Decide whether a client would accept the consensus we have.
  *
  * Clients can say they only want a consensus if it's signed by more
@@ -2799,18 +2720,81 @@ choose_compression_level(ssize_t n_bytes)
   }
 }
 
+/** Information passed to handle a GET request. */
+typedef struct get_handler_args_t {
+  /** True if the client asked for compressed data. */
+  int compressed;
+  /** If nonzero, the time included an if-modified-since header with this
+   * value. */
+  time_t if_modified_since;
+  /** String containing the requested URL or resource. */
+  const char *url;
+  /** String containing the HTTP headers */
+  const char *headers;
+} get_handler_args_t;
+
+/** Entry for handling an HTTP GET request.
+ *
+ * This entry matches a request if "string" is equal to the requested
+ * resource, or if "is_prefix" is true and "string" is a prefix of the
+ * requested resource.
+ *
+ * The 'handler' function is called to handle the request.  It receives
+ * an arguments structure, and must return 0 on success or -1 if we should
+ * close the connection.
+ **/
+typedef struct url_table_ent_s {
+  const char *string;
+  int is_prefix;
+  int (*handler)(dir_connection_t *conn, const get_handler_args_t *args);
+} url_table_ent_t;
+
+static int handle_get_frontpage(dir_connection_t *conn,
+                                const get_handler_args_t *args);
+static int handle_get_current_consensus(dir_connection_t *conn,
+                                const get_handler_args_t *args);
+static int handle_get_status_vote(dir_connection_t *conn,
+                                const get_handler_args_t *args);
+static int handle_get_microdesc(dir_connection_t *conn,
+                                const get_handler_args_t *args);
+static int handle_get_descriptor(dir_connection_t *conn,
+                                const get_handler_args_t *args);
+static int handle_get_keys(dir_connection_t *conn,
+                                const get_handler_args_t *args);
+static int handle_get_rendezvous2(dir_connection_t *conn,
+                                const get_handler_args_t *args);
+static int handle_get_robots(dir_connection_t *conn,
+                                const get_handler_args_t *args);
+static int handle_get_networkstatus_bridges(dir_connection_t *conn,
+                                const get_handler_args_t *args);
+
+/** Table for handling GET requests. */
+static const url_table_ent_t url_table[] = {
+  { "/tor/", 0, handle_get_frontpage },
+  { "/tor/status-vote/current/consensus", 1, handle_get_current_consensus },
+  { "/tor/status-vote/current/", 1, handle_get_status_vote },
+  { "/tor/status-vote/next/", 1, handle_get_status_vote },
+  { "/tor/micro/d/", 1, handle_get_microdesc },
+  { "/tor/server/", 1, handle_get_descriptor },
+  { "/tor/extra/", 1, handle_get_descriptor },
+  { "/tor/keys/", 1, handle_get_keys },
+  { "/tor/rendezvous2/", 1, handle_get_rendezvous2 },
+  { "/tor/robots.txt", 0, handle_get_robots },
+  { "/tor/networkstatus-bridges", 0, handle_get_networkstatus_bridges },
+  { NULL, 0, NULL },
+};
+
 /** Helper function: called when a dirserver gets a complete HTTP GET
  * request.  Look for a request for a directory or for a rendezvous
  * service descriptor.  On finding one, write a response into
- * conn-\>outbuf.  If the request is unrecognized, send a 400.
- * Always return 0. */
+ * conn-\>outbuf.  If the request is unrecognized, send a 404.
+ * Return 0 if we handled this successfully, or -1 if we need to close
+ * the connection. */
 STATIC int
 directory_handle_command_get(dir_connection_t *conn, const char *headers,
                              const char *req_body, size_t req_body_len)
 {
-  size_t dlen;
   char *url, *url_mem, *header;
-  const or_options_t *options = get_options();
   time_t if_modified_since = 0;
   int compressed;
   size_t url_len;
@@ -2850,29 +2834,73 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
     url_len -= 2;
   }
 
-  if (!strcmp(url,"/tor/")) {
-    const char *frontpage = get_dirportfrontpage();
+  get_handler_args_t args;
+  args.url = url;
+  args.headers = headers;
+  args.if_modified_since = if_modified_since;
+  args.compressed = compressed;
 
-    if (frontpage) {
-      dlen = strlen(frontpage);
-      /* Let's return a disclaimer page (users shouldn't use V1 anymore,
-         and caches don't fetch '/', so this is safe). */
-
-      /* [We don't check for write_bucket_low here, since we want to serve
-       *  this page no matter what.] */
-      note_request(url, dlen);
-      write_http_response_header_impl(conn, dlen, "text/html", "identity",
-                                      NULL, DIRPORTFRONTPAGE_CACHE_LIFETIME);
-      connection_write_to_buf(frontpage, dlen, TO_CONN(conn));
+  int i, result = -1;
+  for (i = 0; url_table[i].string; ++i) {
+    int match;
+    if (url_table[i].is_prefix) {
+      match = !strcmpstart(url, url_table[i].string);
+    } else {
+      match = !strcmp(url, url_table[i].string);
+    }
+    if (match) {
+      result = url_table[i].handler(conn, &args);
       goto done;
     }
-    /* if no disclaimer file, fall through and continue */
   }
 
-  if (!strcmpstart(url, "/tor/status-vote/current/consensus")) {
+  /* we didn't recognize the url */
+  write_http_status_line(conn, 404, "Not found");
+  result = 0;
+
+ done:
+  tor_free(url_mem);
+  return result;
+}
+
+/** Helper function for GET / or GET /tor/
+ */
+static int
+handle_get_frontpage(dir_connection_t *conn, const get_handler_args_t *args)
+{
+  (void) args; /* unused */
+  const char *frontpage = get_dirportfrontpage();
+
+  if (frontpage) {
+    size_t dlen;
+    dlen = strlen(frontpage);
+    /* Let's return a disclaimer page (users shouldn't use V1 anymore,
+       and caches don't fetch '/', so this is safe). */
+
+    /* [We don't check for write_bucket_low here, since we want to serve
+     *  this page no matter what.] */
+    write_http_response_header_impl(conn, dlen, "text/html", "identity",
+                                    NULL, DIRPORTFRONTPAGE_CACHE_LIFETIME);
+    connection_write_to_buf(frontpage, dlen, TO_CONN(conn));
+  } else {
+    write_http_status_line(conn, 404, "Not found");
+  }
+  return 0;
+}
+
+/** Helper function for GET /tor/status-vote/current/consensus
+ */
+static int
+handle_get_current_consensus(dir_connection_t *conn,
+                             const get_handler_args_t *args)
+{
+  const char *url = args->url;
+  const int compressed = args->compressed;
+  const time_t if_modified_since = args->if_modified_since;
+
+  {
     /* v3 network status fetch. */
     smartlist_t *dir_fps = smartlist_new();
-    const char *request_type = NULL;
     long lifetime = NETWORKSTATUS_CACHE_LIFETIME;
 
     if (1) {
@@ -2921,7 +2949,6 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
         tor_free(flavor);
         smartlist_add(dir_fps, fp);
       }
-      request_type = compressed?"v3.z":"v3";
       lifetime = (v && v->fresh_until > now) ? v->fresh_until - now : 0;
     }
 
@@ -2946,7 +2973,7 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
       goto done;
     }
 
-    dlen = dirserv_estimate_data_size(dir_fps, 0, compressed);
+    size_t dlen = dirserv_estimate_data_size(dir_fps, 0, compressed);
     if (global_write_bucket_low(TO_CONN(conn), dlen, 2)) {
       log_debug(LD_DIRSERV,
                "Client asked for network status lists, but we've been "
@@ -2976,8 +3003,6 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
       }
     }
 
-    // note_request(request_type,dlen);
-    (void) request_type;
     write_http_response_header(conn, -1, compressed,
                                smartlist_len(dir_fps) == 1 ? lifetime : 0);
     conn->fingerprint_stack = dir_fps;
@@ -2990,17 +3015,24 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
     goto done;
   }
 
-  if (!strcmpstart(url,"/tor/status-vote/current/") ||
-      !strcmpstart(url,"/tor/status-vote/next/")) {
-    /* XXXX If-modified-since is only implemented for the current
-     * consensus: that's probably fine, since it's the only vote document
-     * people fetch much. */
+ done:
+  return 0;
+}
+
+/** Helper function for GET /tor/status-vote/{current,next}/...
+ */
+static int
+handle_get_status_vote(dir_connection_t *conn, const get_handler_args_t *args)
+{
+  const char *url = args->url;
+  const int compressed = args->compressed;
+  {
     int current;
     ssize_t body_len = 0;
     ssize_t estimated_len = 0;
     smartlist_t *items = smartlist_new();
     smartlist_t *dir_items = smartlist_new();
-    int lifetime = 60; /* XXXX023 should actually use vote intervals. */
+    int lifetime = 60; /* XXXX?? should actually use vote intervals. */
     url += strlen("/tor/status-vote/");
     current = !strcmpstart(url, "current/");
     url = strchr(url, '/');
@@ -3090,8 +3122,18 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
     smartlist_free(dir_items);
     goto done;
   }
+ done:
+  return 0;
+}
 
-  if (!strcmpstart(url, "/tor/micro/d/")) {
+/** Helper function for GET /tor/micro/d/...
+ */
+static int
+handle_get_microdesc(dir_connection_t *conn, const get_handler_args_t *args)
+{
+  const char *url = args->url;
+  const int compressed = args->compressed;
+  {
     smartlist_t *fps = smartlist_new();
 
     dir_split_resource_into_fingerprints(url+strlen("/tor/micro/d/"),
@@ -3104,7 +3146,7 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
       smartlist_free(fps);
       goto done;
     }
-    dlen = dirserv_estimate_microdesc_size(fps, compressed);
+    size_t dlen = dirserv_estimate_microdesc_size(fps, compressed);
     if (global_write_bucket_low(TO_CONN(conn), dlen, 2)) {
       log_info(LD_DIRSERV,
                "Client asked for server descriptors, but we've been "
@@ -3127,12 +3169,24 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
     goto done;
   }
 
+ done:
+  return 0;
+}
+
+/** Helper function for GET /tor/{server,extra}/...
+ */
+static int
+handle_get_descriptor(dir_connection_t *conn, const get_handler_args_t *args)
+{
+  const char *url = args->url;
+  const int compressed = args->compressed;
+  const or_options_t *options = get_options();
   if (!strcmpstart(url,"/tor/server/") ||
       (!options->BridgeAuthoritativeDir &&
        !options->BridgeRelay && !strcmpstart(url,"/tor/extra/"))) {
+    size_t dlen;
     int res;
     const char *msg;
-    const char *request_type = NULL;
     int cache_lifetime = 0;
     int is_extra = !strcmpstart(url,"/tor/extra/");
     url += is_extra ? strlen("/tor/extra/") : strlen("/tor/server/");
@@ -3143,24 +3197,16 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
                                           is_extra);
 
     if (!strcmpstart(url, "fp/")) {
-      request_type = compressed?"/tor/server/fp.z":"/tor/server/fp";
       if (smartlist_len(conn->fingerprint_stack) == 1)
         cache_lifetime = ROUTERDESC_CACHE_LIFETIME;
     } else if (!strcmpstart(url, "authority")) {
-      request_type = compressed?"/tor/server/authority.z":
-        "/tor/server/authority";
       cache_lifetime = ROUTERDESC_CACHE_LIFETIME;
     } else if (!strcmpstart(url, "all")) {
-      request_type = compressed?"/tor/server/all.z":"/tor/server/all";
       cache_lifetime = FULL_DIR_CACHE_LIFETIME;
     } else if (!strcmpstart(url, "d/")) {
-      request_type = compressed?"/tor/server/d.z":"/tor/server/d";
       if (smartlist_len(conn->fingerprint_stack) == 1)
         cache_lifetime = ROUTERDESC_BY_DIGEST_CACHE_LIFETIME;
-    } else {
-      request_type = "/tor/server/?";
     }
-    (void) request_type; /* usable for note_request. */
     if (!strcmpstart(url, "d/"))
       conn->dir_spool_src =
         is_extra ? DIR_SPOOL_EXTRA_BY_DIGEST : DIR_SPOOL_SERVER_BY_DIGEST;
@@ -3196,8 +3242,19 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
     }
     goto done;
   }
+ done:
+ return 0;
+}
 
-  if (!strcmpstart(url,"/tor/keys/")) {
+/** Helper function for GET /tor/keys/...
+ */
+static int
+handle_get_keys(dir_connection_t *conn, const get_handler_args_t *args)
+{
+  const char *url = args->url;
+  const int compressed = args->compressed;
+  const time_t if_modified_since = args->if_modified_since;
+  {
     smartlist_t *certs = smartlist_new();
     ssize_t len = -1;
     if (!strcmp(url, "/tor/keys/all")) {
@@ -3282,9 +3339,17 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
     smartlist_free(certs);
     goto done;
   }
+ done:
+  return 0;
+}
 
-  if (connection_dir_is_encrypted(conn) &&
-       !strcmpstart(url,"/tor/rendezvous2/")) {
+/** Helper function for GET /tor/rendezvous2/
+ */
+static int
+handle_get_rendezvous2(dir_connection_t *conn, const get_handler_args_t *args)
+{
+  const char *url = args->url;
+  if (connection_dir_is_encrypted(conn)) {
     /* Handle v2 rendezvous descriptor fetch request. */
     const char *descp;
     const char *query = url + strlen("/tor/rendezvous2/");
@@ -3307,16 +3372,30 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
       write_http_status_line(conn, 400, "Bad request");
     }
     goto done;
+  } else {
+    /* Not encrypted! */
+    write_http_status_line(conn, 404, "Not found");
   }
+ done:
+  return 0;
+}
 
+/** Helper function for GET /tor/networkstatus-bridges
+ */
+static int
+handle_get_networkstatus_bridges(dir_connection_t *conn,
+                                 const get_handler_args_t *args)
+{
+  const char *headers = args->headers;
+
+  const or_options_t *options = get_options();
   if (options->BridgeAuthoritativeDir &&
       options->BridgePassword_AuthDigest_ &&
-      connection_dir_is_encrypted(conn) &&
-      !strcmp(url,"/tor/networkstatus-bridges")) {
+      connection_dir_is_encrypted(conn)) {
     char *status;
     char digest[DIGEST256_LEN];
 
-    header = http_get_header(headers, "Authorization: Basic ");
+    char *header = http_get_header(headers, "Authorization: Basic ");
     if (header)
       crypto_digest256(digest, header, strlen(header), DIGEST_SHA256);
 
@@ -3332,75 +3411,27 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
 
     /* all happy now. send an answer. */
     status = networkstatus_getinfo_by_purpose("bridge", time(NULL));
-    dlen = strlen(status);
+    size_t dlen = strlen(status);
     write_http_response_header(conn, dlen, 0, 0);
     connection_write_to_buf(status, dlen, TO_CONN(conn));
     tor_free(status);
     goto done;
   }
+ done:
+  return 0;
+}
 
-  if (!strcmpstart(url,"/tor/bytes.txt")) {
-    char *bytes = directory_dump_request_log();
-    size_t len = strlen(bytes);
-    write_http_response_header(conn, len, 0, 0);
-    connection_write_to_buf(bytes, len, TO_CONN(conn));
-    tor_free(bytes);
-    goto done;
-  }
-
-  if (!strcmp(url,"/tor/robots.txt")) { /* /robots.txt will have been
-                                           rewritten to /tor/robots.txt */
-    char robots[] = "User-agent: *\r\nDisallow: /\r\n";
+/** Helper function for GET robots.txt or /tor/robots.txt */
+static int
+handle_get_robots(dir_connection_t *conn, const get_handler_args_t *args)
+{
+  (void)args;
+  {
+    const char robots[] = "User-agent: *\r\nDisallow: /\r\n";
     size_t len = strlen(robots);
     write_http_response_header(conn, len, 0, ROBOTS_CACHE_LIFETIME);
     connection_write_to_buf(robots, len, TO_CONN(conn));
-    goto done;
   }
-
-#if defined(EXPORTMALLINFO) && defined(HAVE_MALLOC_H) && defined(HAVE_MALLINFO)
-#define ADD_MALLINFO_LINE(x) do {                               \
-    smartlist_add_asprintf(lines, "%s %d\n", #x, mi.x);        \
-  }while(0);
-
-  if (!strcmp(url,"/tor/mallinfo.txt") &&
-      (tor_addr_eq_ipv4h(&conn->base_.addr, 0x7f000001ul))) {
-    char *result;
-    size_t len;
-    struct mallinfo mi;
-    smartlist_t *lines;
-
-    memset(&mi, 0, sizeof(mi));
-    mi = mallinfo();
-    lines = smartlist_new();
-
-    ADD_MALLINFO_LINE(arena)
-    ADD_MALLINFO_LINE(ordblks)
-    ADD_MALLINFO_LINE(smblks)
-    ADD_MALLINFO_LINE(hblks)
-    ADD_MALLINFO_LINE(hblkhd)
-    ADD_MALLINFO_LINE(usmblks)
-    ADD_MALLINFO_LINE(fsmblks)
-    ADD_MALLINFO_LINE(uordblks)
-    ADD_MALLINFO_LINE(fordblks)
-    ADD_MALLINFO_LINE(keepcost)
-
-    result = smartlist_join_strings(lines, "", 0, NULL);
-    SMARTLIST_FOREACH(lines, char *, cp, tor_free(cp));
-    smartlist_free(lines);
-
-    len = strlen(result);
-    write_http_response_header(conn, len, 0, 0);
-    connection_write_to_buf(result, len, TO_CONN(conn));
-    tor_free(result);
-    goto done;
-  }
-#endif
-
-  /* we didn't recognize the url */
-  write_http_status_line(conn, 404, "Not found");
-
- done:
-  tor_free(url_mem);
   return 0;
 }
 
@@ -3624,226 +3655,37 @@ connection_dir_finished_flushing(dir_connection_t *conn)
   return 0;
 }
 
-/* A helper function for connection_dir_close_consensus_conn_if_extra()
- * and connection_dir_close_extra_consensus_conns() that returns 0 if
- * we can't have, or don't want to close, excess consensus connections. */
-STATIC int
-connection_dir_would_close_consensus_conn_helper(void)
-{
-  const or_options_t *options = get_options();
-
-  /* we're only interested in closing excess connections if we could
-   * have created any in the first place */
-  if (!networkstatus_consensus_can_use_multiple_directories(options)) {
-    return 0;
-  }
-
-  /* We want to close excess connections downloading a consensus.
-   * If there aren't any excess, we don't have anything to close. */
-  if (!networkstatus_consensus_has_excess_connections()) {
-    return 0;
-  }
-
-  /* If we have excess connections, but none of them are downloading a
-   * consensus, and we are still bootstrapping (that is, we have no usable
-   * consensus), we don't want to close any until one starts downloading. */
-  if (!networkstatus_consensus_is_downloading_usable_flavor()
-      && networkstatus_consensus_is_bootstrapping(time(NULL))) {
-    return 0;
-  }
-
-  /* If we have just stopped bootstrapping (that is, just parsed a consensus),
-   * we might still have some excess connections hanging around. So we still
-   * have to check if we want to close any, even if we've stopped
-   * bootstrapping. */
-  return 1;
-}
-
-/* Check if we would close excess consensus connections. If we would, any
- * new consensus connection would become excess immediately, so return 1.
- * Otherwise, return 0. */
-int
-connection_dir_avoid_extra_connection_for_purpose(unsigned int purpose)
-{
-  const or_options_t *options = get_options();
-
-  /* We're not interested in connections that aren't fetching a consensus. */
-  if (purpose != DIR_PURPOSE_FETCH_CONSENSUS) {
-    return 0;
-  }
-
-  /* we're only interested in avoiding excess connections if we could
-   * have created any in the first place */
-  if (!networkstatus_consensus_can_use_multiple_directories(options)) {
-    return 0;
-  }
-
-  /* If there are connections downloading a consensus, and we are still
-   * bootstrapping (that is, we have no usable consensus), we can be sure that
-   * any further connections would be excess. */
-  if (networkstatus_consensus_is_downloading_usable_flavor()
-      && networkstatus_consensus_is_bootstrapping(time(NULL))) {
-    return 1;
-  }
-
-  return 0;
-}
-
-/* Check if we have more than one consensus download connection attempt, and
- * close conn:
- * - if we don't have a consensus, and we're downloading a consensus, and conn
- *   is not downloading a consensus yet;
- * - if we do have a consensus, and there's more than one consensus connection.
+/* We just got a new consensus! If there are other in-progress requests
+ * for this consensus flavor (for example because we launched several in
+ * parallel), cancel them.
  *
- * Post-bootstrap consensus connection attempts are initiated one at a time.
- * So this function won't close any consensus connection attempts that
- * are initiated after bootstrap.
- */
-int
-connection_dir_close_consensus_conn_if_extra(dir_connection_t *conn)
-{
-  tor_assert(conn);
-  tor_assert(conn->base_.type == CONN_TYPE_DIR);
-
-  /* We're not interested in connections that aren't fetching a consensus. */
-  if (conn->base_.purpose != DIR_PURPOSE_FETCH_CONSENSUS) {
-    return 0;
-  }
-
-  /* The connection has already been closed */
-  if (conn->base_.marked_for_close) {
-    return 0;
-  }
-
-  /* Only close this connection if there's another consensus connection
-   * downloading (during bootstrap), or connecting (after bootstrap).
-   * Post-bootstrap consensus connection attempts won't be closed, because
-   * they only occur one at a time. */
-  if (!connection_dir_would_close_consensus_conn_helper()) {
-    return 0;
-  }
-
-  const int we_are_bootstrapping = networkstatus_consensus_is_bootstrapping(
-                                                                  time(NULL));
-
-  /* We don't want to check other connections to see if they are downloading,
-   * as this is prone to race-conditions. So leave it for
-   * connection_dir_close_extra_consensus_conns(() to clean up.
-   *
-   * But if conn has just started connecting, or we have a consensus already,
-   * we can be sure it's not needed any more. */
-  if (!we_are_bootstrapping
-      || conn->base_.state == DIR_CONN_STATE_CONNECTING) {
-    connection_close_immediate(&conn->base_);
-    connection_mark_for_close(&conn->base_);
-    return -1;
-  }
-
-  return 0;
-}
-
-/* Clean up excess consensus download connection attempts.
- * During bootstrap, or when the bootstrap consensus has just been downloaded,
- * if we have more than one active consensus connection:
- * - if we don't have a consensus, and we're downloading a consensus, keep an
- *   earlier connection, or a connection to a fallback directory, and close
- *   all other connections;
- * - if we have just downloaded the bootstrap consensus, and have other
- *   consensus connections left over, close all of them.
+ * We do this check here (not just in
+ * connection_ap_handshake_attach_circuit()) to handle the edge case where
+ * a consensus fetch begins and ends before some other one tries to attach to
+ * a circuit, in which case the other one won't know that we're all happy now.
  *
- * Post-bootstrap consensus connection attempts are initiated one at a time.
- * So this function won't close any consensus connection attempts that
- * are initiated after bootstrap.
+ * Don't mark the conn that just gave us the consensus -- otherwise we
+ * would end up double-marking it when it cleans itself up.
  */
-void
-connection_dir_close_extra_consensus_conns(void)
+static void
+connection_dir_close_consensus_fetches(dir_connection_t *except_this_one,
+                                       const char *resource)
 {
-  /* Only cleanup connections if there is more than one consensus connection,
-   * and at least one of those connections is already downloading
-   * (during bootstrap), or connecting (just after the bootstrap consensus is
-   * downloaded).
-   * Post-bootstrap consensus connection attempts won't be cleaned up, because
-   * they only occur one at a time. */
-  if (!connection_dir_would_close_consensus_conn_helper()) {
-    return;
-  }
-
-  int we_are_bootstrapping = networkstatus_consensus_is_bootstrapping(
-                                                                  time(NULL));
-
-  const char *usable_resource = networkstatus_get_flavor_name(
-                                                  usable_consensus_flavor());
-  smartlist_t *consens_usable_conns =
-                 connection_dir_list_by_purpose_and_resource(
-                                                  DIR_PURPOSE_FETCH_CONSENSUS,
-                                                  usable_resource);
-
-  /* If we want to keep a connection that's downloading, find a connection to
-   * keep, favouring:
-   * - connections opened earlier (they are likely to have progressed further)
-   * - connections to fallbacks (to reduce the load on authorities) */
-  dir_connection_t *kept_download_conn = NULL;
-  int kept_is_authority = 0;
-  if (we_are_bootstrapping) {
-    SMARTLIST_FOREACH_BEGIN(consens_usable_conns,
-                            dir_connection_t *, d) {
-      tor_assert(d);
-      int d_is_authority = router_digest_is_trusted_dir(d->identity_digest);
-      /* keep the first connection that is past the connecting state, but
-       * prefer fallbacks. */
-      if (d->base_.state != DIR_CONN_STATE_CONNECTING) {
-        if (!kept_download_conn || (kept_is_authority && !d_is_authority)) {
-          kept_download_conn = d;
-          kept_is_authority = d_is_authority;
-          /* we've found the earliest fallback, and want to keep it regardless
-           * of any other connections */
-          if (!kept_is_authority)
-            break;
-        }
-      }
-    } SMARTLIST_FOREACH_END(d);
-  }
-
-  SMARTLIST_FOREACH_BEGIN(consens_usable_conns,
-                          dir_connection_t *, d) {
-    tor_assert(d);
-    /* don't close this connection if it's the one we want to keep */
-    if (kept_download_conn && d == kept_download_conn)
+  smartlist_t *conns_to_close =
+    connection_dir_list_by_purpose_and_resource(DIR_PURPOSE_FETCH_CONSENSUS,
+                                                resource);
+  SMARTLIST_FOREACH_BEGIN(conns_to_close, dir_connection_t *, d) {
+    if (d == except_this_one)
       continue;
-    /* mark all other connections for close */
-    if (!d->base_.marked_for_close) {
-      connection_close_immediate(&d->base_);
-      connection_mark_for_close(&d->base_);
-    }
+    log_info(LD_DIR, "Closing consensus fetch (to %s) since one "
+             "has just arrived.", TO_CONN(d)->address);
+    connection_mark_for_close(TO_CONN(d));
   } SMARTLIST_FOREACH_END(d);
-
-  smartlist_free(consens_usable_conns);
-  consens_usable_conns = NULL;
-
-  /* make sure we've closed all excess connections */
-  const int final_connecting_conn_count =
-              connection_dir_count_by_purpose_resource_and_state(
-                                                DIR_PURPOSE_FETCH_CONSENSUS,
-                                                usable_resource,
-                                                DIR_CONN_STATE_CONNECTING);
-  if (final_connecting_conn_count > 0) {
-    log_warn(LD_BUG, "Expected 0 consensus connections connecting after "
-             "cleanup, got %d.", final_connecting_conn_count);
-  }
-  const int expected_final_conn_count = (we_are_bootstrapping ? 1 : 0);
-  const int final_conn_count =
-              connection_dir_count_by_purpose_and_resource(
-                                                DIR_PURPOSE_FETCH_CONSENSUS,
-                                                usable_resource);
-  if (final_conn_count > expected_final_conn_count) {
-    log_warn(LD_BUG, "Expected %d consensus connections after cleanup, got "
-             "%d.", expected_final_conn_count, final_connecting_conn_count);
-  }
+  smartlist_free(conns_to_close);
 }
 
 /** Connected handler for directory connections: begin sending data to the
- * server, and return 0, or, if the connection is an excess bootstrap
- * connection, close all excess bootstrap connections.
+ * server, and return 0.
  * Only used when connections don't immediately connect. */
 int
 connection_dir_finished_connecting(dir_connection_t *conn)
@@ -3854,12 +3696,6 @@ connection_dir_finished_connecting(dir_connection_t *conn)
 
   log_debug(LD_HTTP,"Dir connection to router %s:%u established.",
             conn->base_.address,conn->base_.port);
-
-  /* Close this connection if there's another consensus connection
-   * downloading (during bootstrap), or connecting (after bootstrap). */
-  if (connection_dir_close_consensus_conn_if_extra(conn)) {
-    return -1;
-  }
 
   /* start flushing conn */
   conn->base_.state = DIR_CONN_STATE_CLIENT_SENDING;

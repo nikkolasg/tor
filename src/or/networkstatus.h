@@ -70,13 +70,12 @@ MOCK_DECL(networkstatus_t *,networkstatus_get_latest_consensus_by_flavor,
 networkstatus_t *networkstatus_get_live_consensus(time_t now);
 networkstatus_t *networkstatus_get_reasonably_live_consensus(time_t now,
                                                              int flavor);
-int networkstatus_consensus_is_bootstrapping(time_t now);
+MOCK_DECL(int, networkstatus_consensus_is_bootstrapping,(time_t now));
 int networkstatus_consensus_can_use_multiple_directories(
                                                 const or_options_t *options);
-int networkstatus_consensus_can_use_extra_fallbacks(
-                                                const or_options_t *options);
-int networkstatus_consensus_has_excess_connections(void);
-int networkstatus_consensus_is_downloading_usable_flavor(void);
+MOCK_DECL(int, networkstatus_consensus_can_use_extra_fallbacks,(
+                                                const or_options_t *options));
+int networkstatus_consensus_is_already_downloading(const char *resource);
 
 #define NSSET_FROM_CACHE 1
 #define NSSET_WAS_WAITING_FOR_CERTS 2
@@ -85,8 +84,9 @@ int networkstatus_consensus_is_downloading_usable_flavor(void);
 #define NSSET_REQUIRE_FLAVOR 16
 int networkstatus_set_current_consensus(const char *consensus,
                                         const char *flavor,
-                                        unsigned flags);
-void networkstatus_note_certs_arrived(void);
+                                        unsigned flags,
+                                        const char *source_dir);
+void networkstatus_note_certs_arrived(const char *source_dir);
 void routers_update_all_from_networkstatus(time_t now, int dir_version);
 void routers_update_status_from_consensus_networkstatus(smartlist_t *routers,
                                                         int reset_failures);

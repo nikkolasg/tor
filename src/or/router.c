@@ -1054,7 +1054,8 @@ init_keys(void)
     log_info(LD_DIR, "adding my own v3 cert");
     if (trusted_dirs_load_certs_from_string(
                       cert->cache_info.signed_descriptor_body,
-                      TRUSTED_DIRS_CERTS_SRC_SELF, 0)<0) {
+                      TRUSTED_DIRS_CERTS_SRC_SELF, 0,
+                      NULL)<0) {
       log_warn(LD_DIR, "Unable to parse my own v3 cert! Failing.");
       return -1;
     }
@@ -1079,23 +1080,49 @@ router_reset_reachability(void)
   can_reach_or_port = can_reach_dir_port = 0;
 }
 
-/** Return 1 if ORPort is known reachable; else return 0. */
-int
-check_whether_orport_reachable(void)
+/** Return 1 if we won't do reachability checks, because:
+ *   - AssumeReachable is set, or
+ *   - the network is disabled.
+ * Otherwise, return 0.
+ */
+static int
+router_reachability_checks_disabled(const or_options_t *options)
 {
-  const or_options_t *options = get_options();
   return options->AssumeReachable ||
+         net_is_disabled();
+}
+
+/** Return 0 if we need to do an ORPort reachability check, because:
+ *   - no reachability check has been done yet, or
+ *   - we've initiated reachability checks, but none have succeeded.
+ *  Return 1 if we don't need to do an ORPort reachability check, because:
+ *   - we've seen a successful reachability check, or
+ *   - AssumeReachable is set, or
+ *   - the network is disabled.
+ */
+int
+check_whether_orport_reachable(const or_options_t *options)
+{
+  int reach_checks_disabled = router_reachability_checks_disabled(options);
+  return reach_checks_disabled ||
          can_reach_or_port;
 }
 
-/** Return 1 if we don't have a dirport configured, or if it's reachable. */
+/** Return 0 if we need to do a DirPort reachability check, because:
+ *   - no reachability check has been done yet, or
+ *   - we've initiated reachability checks, but none have succeeded.
+ *  Return 1 if we don't need to do a DirPort reachability check, because:
+ *   - we've seen a successful reachability check, or
+ *   - there is no DirPort set, or
+ *   - AssumeReachable is set, or
+ *   - the network is disabled.
+ */
 int
-check_whether_dirport_reachable(void)
+check_whether_dirport_reachable(const or_options_t *options)
 {
-  const or_options_t *options = get_options();
-  return !options->DirPort_set ||
-         options->AssumeReachable ||
-         net_is_disabled() ||
+  int reach_checks_disabled = router_reachability_checks_disabled(options) ||
+                              !options->DirPort_set;
+  return reach_checks_disabled ||
          can_reach_dir_port;
 }
 
@@ -1148,10 +1175,11 @@ router_should_be_directory_server(const or_options_t *options, int dir_port)
                        "seconds long. Raising to 1.");
       interval_length = 1;
     }
-    log_info(LD_GENERAL, "Calculating whether to disable dirport: effective "
+    log_info(LD_GENERAL, "Calculating whether to advertise %s: effective "
                          "bwrate: %u, AccountingMax: "U64_FORMAT", "
-                         "accounting interval length %d", effective_bw,
-                         U64_PRINTF_ARG(options->AccountingMax),
+                         "accounting interval length %d",
+                         dir_port ? "dirport" : "begindir",
+                         effective_bw, U64_PRINTF_ARG(options->AccountingMax),
                          interval_length);
 
     acc_bytes = options->AccountingMax;
@@ -1199,34 +1227,62 @@ dir_server_mode(const or_options_t *options)
 }
 
 /** Look at a variety of factors, and return 0 if we don't want to
- * advertise the fact that we have a DirPort open, else return the
- * DirPort we want to advertise.
+ * advertise the fact that we have a DirPort open or begindir support, else
+ * return 1.
  *
- * Log a helpful message if we change our mind about whether to publish
- * a DirPort.
+ * Where dir_port or supports_tunnelled_dir_requests are not relevant, they
+ * must be 0.
+ *
+ * Log a helpful message if we change our mind about whether to publish.
  */
 static int
-decide_to_advertise_dirport(const or_options_t *options, uint16_t dir_port)
+decide_to_advertise_dir_impl(const or_options_t *options,
+                             uint16_t dir_port,
+                             int supports_tunnelled_dir_requests)
 {
   /* Part one: reasons to publish or not publish that aren't
    * worth mentioning to the user, either because they're obvious
    * or because they're normal behavior. */
 
-  if (!dir_port) /* short circuit the rest of the function */
+  /* short circuit the rest of the function */
+  if (!dir_port && !supports_tunnelled_dir_requests)
     return 0;
   if (authdir_mode(options)) /* always publish */
-    return dir_port;
+    return 1;
   if (net_is_disabled())
     return 0;
-  if (!check_whether_dirport_reachable())
+  if (dir_port && !router_get_advertised_dir_port(options, dir_port))
     return 0;
-  if (!router_get_advertised_dir_port(options, dir_port))
+  if (supports_tunnelled_dir_requests &&
+      !router_get_advertised_or_port(options))
     return 0;
 
-  /* Part two: reasons to publish or not publish that the user
-   * might find surprising. router_should_be_directory_server()
-   * considers config options that make us choose not to publish. */
-  return router_should_be_directory_server(options, dir_port) ? dir_port : 0;
+  /* Part two: consider config options that could make us choose to
+   * publish or not publish that the user might find surprising. */
+  return router_should_be_directory_server(options, dir_port);
+}
+
+/** Front-end to decide_to_advertise_dir_impl(): return 0 if we don't want to
+ * advertise the fact that we have a DirPort open, else return the
+ * DirPort we want to advertise.
+ */
+static int
+decide_to_advertise_dirport(const or_options_t *options, uint16_t dir_port)
+{
+  /* supports_tunnelled_dir_requests is not relevant, pass 0 */
+  return decide_to_advertise_dir_impl(options, dir_port, 0) ? dir_port : 0;
+}
+
+/** Front-end to decide_to_advertise_dir_impl(): return 0 if we don't want to
+ * advertise the fact that we support begindir requests, else return 1.
+ */
+static int
+decide_to_advertise_begindir(const or_options_t *options,
+                             int supports_tunnelled_dir_requests)
+{
+  /* dir_port is not relevant, pass 0 */
+  return decide_to_advertise_dir_impl(options, 0,
+                                      supports_tunnelled_dir_requests);
 }
 
 /** Allocate and return a new extend_info_t that can be used to build
@@ -1260,9 +1316,9 @@ void
 consider_testing_reachability(int test_or, int test_dir)
 {
   const routerinfo_t *me = router_get_my_routerinfo();
-  int orport_reachable = check_whether_orport_reachable();
-  tor_addr_t addr;
   const or_options_t *options = get_options();
+  int orport_reachable = check_whether_orport_reachable(options);
+  tor_addr_t addr;
   if (!me)
     return;
 
@@ -1295,7 +1351,7 @@ consider_testing_reachability(int test_or, int test_dir)
 
   /* XXX IPv6 self testing */
   tor_addr_from_ipv4h(&addr, me->addr);
-  if (test_dir && !check_whether_dirport_reachable() &&
+  if (test_dir && !check_whether_dirport_reachable(options) &&
       !connection_get_by_type_addr_port_purpose(
                 CONN_TYPE_DIR, &addr, me->dir_port,
                 DIR_PURPOSE_FETCH_SERVERDESC)) {
@@ -1314,18 +1370,19 @@ void
 router_orport_found_reachable(void)
 {
   const routerinfo_t *me = router_get_my_routerinfo();
+  const or_options_t *options = get_options();
   if (!can_reach_or_port && me) {
     char *address = tor_dup_ip(me->addr);
     log_notice(LD_OR,"Self-testing indicates your ORPort is reachable from "
                "the outside. Excellent.%s",
-               get_options()->PublishServerDescriptor_ != NO_DIRINFO
-               && check_whether_dirport_reachable() ?
+               options->PublishServerDescriptor_ != NO_DIRINFO
+               && check_whether_dirport_reachable(options) ?
                  " Publishing server descriptor." : "");
     can_reach_or_port = 1;
     mark_my_descriptor_dirty("ORPort found reachable");
     /* This is a significant enough change to upload immediately,
      * at least in a test network */
-    if (get_options()->TestingTorNetwork == 1) {
+    if (options->TestingTorNetwork == 1) {
       reschedule_descriptor_update_check();
     }
     control_event_server_status(LOG_NOTICE,
@@ -1340,19 +1397,20 @@ void
 router_dirport_found_reachable(void)
 {
   const routerinfo_t *me = router_get_my_routerinfo();
+  const or_options_t *options = get_options();
   if (!can_reach_dir_port && me) {
     char *address = tor_dup_ip(me->addr);
     log_notice(LD_DIRSERV,"Self-testing indicates your DirPort is reachable "
                "from the outside. Excellent.%s",
-               get_options()->PublishServerDescriptor_ != NO_DIRINFO
-               && check_whether_orport_reachable() ?
+               options->PublishServerDescriptor_ != NO_DIRINFO
+               && check_whether_orport_reachable(options) ?
                " Publishing server descriptor." : "");
     can_reach_dir_port = 1;
-    if (decide_to_advertise_dirport(get_options(), me->dir_port)) {
+    if (decide_to_advertise_dirport(options, me->dir_port)) {
       mark_my_descriptor_dirty("DirPort found reachable");
       /* This is a significant enough change to upload immediately,
        * at least in a test network */
-      if (get_options()->TestingTorNetwork == 1) {
+      if (options->TestingTorNetwork == 1) {
         reschedule_descriptor_update_check();
       }
     }
@@ -1480,7 +1538,7 @@ MOCK_IMPL(int,
 server_mode,(const or_options_t *options))
 {
   if (options->ClientOnly) return 0;
-  /* XXXX024 I believe we can kill off ORListenAddress here.*/
+  /* XXXX I believe we can kill off ORListenAddress here.*/
   return (options->ORPort_set || options->ORListenAddress);
 }
 
@@ -1549,8 +1607,10 @@ proxy_mode(const or_options_t *options)
  * and
  * - We have ORPort set
  * and
- * - We believe both our ORPort and DirPort (if present) are reachable from
+ * - We believe our ORPort and DirPort (if present) are reachable from
  *   the outside; or
+ * - We believe our ORPort is reachable from the outside, and we can't
+ *   check our DirPort because the consensus has no exits; or
  * - We are an authoritative directory server.
  */
 static int
@@ -1568,8 +1628,15 @@ decide_if_publishable_server(void)
     return 1;
   if (!router_get_advertised_or_port(options))
     return 0;
-
-  return check_whether_orport_reachable() && check_whether_dirport_reachable();
+  if (!check_whether_orport_reachable(options))
+    return 0;
+  if (router_have_consensus_path() == CONSENSUS_PATH_INTERNAL) {
+    /* All set: there are no exits in the consensus (maybe this is a tiny
+     * test network), so we can't check our DirPort reachability. */
+    return 1;
+  } else {
+    return check_whether_dirport_reachable(options);
+  }
 }
 
 /** Initiate server descriptor upload as reasonable (if server is publishable,
@@ -1924,8 +1991,8 @@ router_build_fresh_descriptor(routerinfo_t **r, extrainfo_t **e)
   ri->addr = addr;
   ri->or_port = router_get_advertised_or_port(options);
   ri->dir_port = router_get_advertised_dir_port(options, 0);
-  ri->supports_tunnelled_dir_requests = dir_server_mode(options) &&
-    router_should_be_directory_server(options, ri->dir_port);
+  ri->supports_tunnelled_dir_requests =
+    directory_permits_begindir_requests(options);
   ri->cache_info.published_on = time(NULL);
   ri->onion_pkey = crypto_pk_dup_key(get_onion_key()); /* must invoke from
                                                         * main thread */
@@ -1970,7 +2037,8 @@ router_build_fresh_descriptor(routerinfo_t **r, extrainfo_t **e)
     routerinfo_free(ri);
     return -1;
   }
-  ri->signing_key_cert = tor_cert_dup(get_master_signing_key_cert());
+  ri->cache_info.signing_key_cert =
+    tor_cert_dup(get_master_signing_key_cert());
 
   get_platform_str(platform, sizeof(platform));
   ri->platform = tor_strdup(platform);
@@ -2062,7 +2130,9 @@ router_build_fresh_descriptor(routerinfo_t **r, extrainfo_t **e)
   ei->cache_info.is_extrainfo = 1;
   strlcpy(ei->nickname, get_options()->Nickname, sizeof(ei->nickname));
   ei->cache_info.published_on = ri->cache_info.published_on;
-  ei->signing_key_cert = tor_cert_dup(get_master_signing_key_cert());
+  ei->cache_info.signing_key_cert =
+    tor_cert_dup(get_master_signing_key_cert());
+
   memcpy(ei->cache_info.identity_digest, ri->cache_info.identity_digest,
          DIGEST_LEN);
   if (extrainfo_dump_to_string(&ei->cache_info.signed_descriptor_body,
@@ -2088,7 +2158,7 @@ router_build_fresh_descriptor(routerinfo_t **r, extrainfo_t **e)
     memcpy(ri->cache_info.extra_info_digest,
            ei->cache_info.signed_descriptor_digest,
            DIGEST_LEN);
-    memcpy(ri->extra_info_digest256,
+    memcpy(ri->cache_info.extra_info_digest256,
            ei->digest256,
            DIGEST256_LEN);
   } else {
@@ -2129,7 +2199,9 @@ router_build_fresh_descriptor(routerinfo_t **r, extrainfo_t **e)
                          ri->cache_info.signed_descriptor_digest);
 
   if (ei) {
-    tor_assert(! routerinfo_incompatible_with_extrainfo(ri, ei, NULL, NULL));
+    tor_assert(!
+          routerinfo_incompatible_with_extrainfo(ri->identity_pkey, ei,
+                                                 &ri->cache_info, NULL));
   }
 
   *r = ri;
@@ -2458,7 +2530,8 @@ router_dump_router_to_string(routerinfo_t *router,
   const or_options_t *options = get_options();
   smartlist_t *chunks = NULL;
   char *output = NULL;
-  const int emit_ed_sigs = signing_keypair && router->signing_key_cert;
+  const int emit_ed_sigs = signing_keypair &&
+    router->cache_info.signing_key_cert;
   char *ed_cert_line = NULL;
   char *rsa_tap_cc_line = NULL;
   char *ntor_cc_line = NULL;
@@ -2470,12 +2543,12 @@ router_dump_router_to_string(routerinfo_t *router,
     goto err;
   }
   if (emit_ed_sigs) {
-    if (!router->signing_key_cert->signing_key_included ||
-        !ed25519_pubkey_eq(&router->signing_key_cert->signed_key,
+    if (!router->cache_info.signing_key_cert->signing_key_included ||
+        !ed25519_pubkey_eq(&router->cache_info.signing_key_cert->signed_key,
                            &signing_keypair->pubkey)) {
       log_warn(LD_BUG, "Tried to sign a router descriptor with a mismatched "
                "ed25519 key chain %d",
-               router->signing_key_cert->signing_key_included);
+               router->cache_info.signing_key_cert->signing_key_included);
       goto err;
     }
   }
@@ -2491,14 +2564,14 @@ router_dump_router_to_string(routerinfo_t *router,
     char ed_cert_base64[256];
     char ed_fp_base64[ED25519_BASE64_LEN+1];
     if (base64_encode(ed_cert_base64, sizeof(ed_cert_base64),
-                      (const char*)router->signing_key_cert->encoded,
-                      router->signing_key_cert->encoded_len,
-                      BASE64_ENCODE_MULTILINE) < 0) {
+                    (const char*)router->cache_info.signing_key_cert->encoded,
+                    router->cache_info.signing_key_cert->encoded_len,
+                    BASE64_ENCODE_MULTILINE) < 0) {
       log_err(LD_BUG,"Couldn't base64-encode signing key certificate!");
       goto err;
     }
     if (ed25519_public_to_base64(ed_fp_base64,
-                                 &router->signing_key_cert->signing_key)<0) {
+                       &router->cache_info.signing_key_cert->signing_key)<0) {
       log_err(LD_BUG,"Couldn't base64-encode identity key\n");
       goto err;
     }
@@ -2525,15 +2598,15 @@ router_dump_router_to_string(routerinfo_t *router,
   }
 
   /* Cross-certify with RSA key */
-  if (tap_key && router->signing_key_cert &&
-      router->signing_key_cert->signing_key_included) {
+  if (tap_key && router->cache_info.signing_key_cert &&
+      router->cache_info.signing_key_cert->signing_key_included) {
     char buf[256];
     int tap_cc_len = 0;
     uint8_t *tap_cc =
       make_tap_onion_key_crosscert(tap_key,
-                                   &router->signing_key_cert->signing_key,
-                                   router->identity_pkey,
-                                   &tap_cc_len);
+                            &router->cache_info.signing_key_cert->signing_key,
+                            router->identity_pkey,
+                            &tap_cc_len);
     if (!tap_cc) {
       log_warn(LD_BUG,"make_tap_onion_key_crosscert failed!");
       goto err;
@@ -2555,16 +2628,16 @@ router_dump_router_to_string(routerinfo_t *router,
   }
 
   /* Cross-certify with onion keys */
-  if (ntor_keypair && router->signing_key_cert &&
-      router->signing_key_cert->signing_key_included) {
+  if (ntor_keypair && router->cache_info.signing_key_cert &&
+      router->cache_info.signing_key_cert->signing_key_included) {
     int sign = 0;
     char buf[256];
     /* XXXX Base the expiration date on the actual onion key expiration time?*/
     tor_cert_t *cert =
       make_ntor_onion_key_crosscert(ntor_keypair,
-                                &router->signing_key_cert->signing_key,
-                                router->cache_info.published_on,
-                                MIN_ONION_KEY_LIFETIME, &sign);
+                         &router->cache_info.signing_key_cert->signing_key,
+                         router->cache_info.published_on,
+                         MIN_ONION_KEY_LIFETIME, &sign);
     if (!cert) {
       log_warn(LD_BUG,"make_ntor_onion_key_crosscert failed!");
       goto err;
@@ -2603,9 +2676,9 @@ router_dump_router_to_string(routerinfo_t *router,
     char extra_info_digest[HEX_DIGEST_LEN+1];
     base16_encode(extra_info_digest, sizeof(extra_info_digest),
                   router->cache_info.extra_info_digest, DIGEST_LEN);
-    if (!tor_digest256_is_zero(router->extra_info_digest256)) {
+    if (!tor_digest256_is_zero(router->cache_info.extra_info_digest256)) {
       char d256_64[BASE64_DIGEST256_LEN+1];
-      digest256_to_base64(d256_64, router->extra_info_digest256);
+      digest256_to_base64(d256_64, router->cache_info.extra_info_digest256);
       tor_asprintf(&extra_info_line, "extra-info-digest %s %s\n",
                    extra_info_digest, d256_64);
     } else {
@@ -2706,7 +2779,8 @@ router_dump_router_to_string(routerinfo_t *router,
     tor_free(p6);
   }
 
-  if (router->supports_tunnelled_dir_requests) {
+  if (decide_to_advertise_begindir(options,
+                                   router->supports_tunnelled_dir_requests)) {
     smartlist_add(chunks, tor_strdup("tunnelled-dir-server\n"));
   }
 
@@ -2910,7 +2984,8 @@ extrainfo_dump_to_string(char **s_out, extrainfo_t *extrainfo,
   time_t now = time(NULL);
   smartlist_t *chunks = smartlist_new();
   extrainfo_t *ei_tmp = NULL;
-  const int emit_ed_sigs = signing_keypair && extrainfo->signing_key_cert;
+  const int emit_ed_sigs = signing_keypair &&
+    extrainfo->cache_info.signing_key_cert;
   char *ed_cert_line = NULL;
 
   base16_encode(identity, sizeof(identity),
@@ -2918,19 +2993,19 @@ extrainfo_dump_to_string(char **s_out, extrainfo_t *extrainfo,
   format_iso_time(published, extrainfo->cache_info.published_on);
   bandwidth_usage = rep_hist_get_bandwidth_lines();
   if (emit_ed_sigs) {
-    if (!extrainfo->signing_key_cert->signing_key_included ||
-        !ed25519_pubkey_eq(&extrainfo->signing_key_cert->signed_key,
+    if (!extrainfo->cache_info.signing_key_cert->signing_key_included ||
+        !ed25519_pubkey_eq(&extrainfo->cache_info.signing_key_cert->signed_key,
                            &signing_keypair->pubkey)) {
       log_warn(LD_BUG, "Tried to sign a extrainfo descriptor with a "
                "mismatched ed25519 key chain %d",
-               extrainfo->signing_key_cert->signing_key_included);
+               extrainfo->cache_info.signing_key_cert->signing_key_included);
       goto err;
     }
     char ed_cert_base64[256];
     if (base64_encode(ed_cert_base64, sizeof(ed_cert_base64),
-                      (const char*)extrainfo->signing_key_cert->encoded,
-                      extrainfo->signing_key_cert->encoded_len,
-                      BASE64_ENCODE_MULTILINE) < 0) {
+                 (const char*)extrainfo->cache_info.signing_key_cert->encoded,
+                 extrainfo->cache_info.signing_key_cert->encoded_len,
+                 BASE64_ENCODE_MULTILINE) < 0) {
       log_err(LD_BUG,"Couldn't base64-encode signing key certificate!");
       goto err;
     }

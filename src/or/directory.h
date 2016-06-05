@@ -28,8 +28,8 @@ void directory_get_from_all_authorities(uint8_t dir_purpose,
 
 /** Enumeration of ways to connect to a directory server */
 typedef enum {
-  /** Default: connect over a one-hop Tor circuit but fall back to direct
-   * connection */
+  /** Default: connect over a one-hop Tor circuit. Relays fall back to direct
+   * DirPort connections, clients, onion services, and bridges do not */
   DIRIND_ONEHOP=0,
   /** Connect over a multi-hop anonymizing Tor circuit */
   DIRIND_ANONYMOUS=1,
@@ -38,6 +38,8 @@ typedef enum {
   /** Connect over a multi-hop anonymizing Tor circuit to our dirport */
   DIRIND_ANON_DIRPORT,
 } dir_indirection_t;
+
+int directory_must_use_begindir(const or_options_t *options);
 
 MOCK_DECL(void, directory_initiate_command_routerstatus,
                 (const routerstatus_t *status,
@@ -76,9 +78,6 @@ void directory_initiate_command(const tor_addr_t *or_addr, uint16_t or_port,
                                 const char *resource,
                                 const char *payload, size_t payload_len,
                                 time_t if_modified_since);
-int connection_dir_avoid_extra_connection_for_purpose(unsigned int purpose);
-int connection_dir_close_consensus_conn_if_extra(dir_connection_t *conn);
-void connection_dir_close_extra_consensus_conns(void);
 
 #define DSR_HEX       (1<<0)
 #define DSR_BASE64    (1<<1)
@@ -145,7 +144,6 @@ STATIC int directory_handle_command_get(dir_connection_t *conn,
                                         const char *headers,
                                         const char *req_body,
                                         size_t req_body_len);
-STATIC int connection_dir_would_close_consensus_conn_helper(void);
 STATIC int download_status_schedule_get_delay(download_status_t *dls,
                                               const smartlist_t *schedule,
                                               time_t now);

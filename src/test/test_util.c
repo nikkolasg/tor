@@ -4223,21 +4223,6 @@ test_util_round_to_next_multiple_of(void *arg)
   tt_u64_op(round_uint64_to_next_multiple_of(UINT64_MAX,2), ==,
             UINT64_MAX);
 
-  tt_i64_op(round_int64_to_next_multiple_of(0,1), ==, 0);
-  tt_i64_op(round_int64_to_next_multiple_of(0,7), ==, 0);
-
-  tt_i64_op(round_int64_to_next_multiple_of(99,1), ==, 99);
-  tt_i64_op(round_int64_to_next_multiple_of(99,7), ==, 105);
-  tt_i64_op(round_int64_to_next_multiple_of(99,9), ==, 99);
-
-  tt_i64_op(round_int64_to_next_multiple_of(-99,1), ==, -99);
-  tt_i64_op(round_int64_to_next_multiple_of(-99,7), ==, -98);
-  tt_i64_op(round_int64_to_next_multiple_of(-99,9), ==, -99);
-
-  tt_i64_op(round_int64_to_next_multiple_of(INT64_MIN,2), ==, INT64_MIN);
-  tt_i64_op(round_int64_to_next_multiple_of(INT64_MAX,2), ==,
-                                            INT64_MAX);
-
   tt_int_op(round_uint32_to_next_multiple_of(0,1), ==, 0);
   tt_int_op(round_uint32_to_next_multiple_of(0,7), ==, 0);
 
@@ -4679,7 +4664,7 @@ test_util_writepid(void *arg)
   contents = read_file_to_str(fname, 0, NULL);
   tt_assert(contents);
 
-  int n = sscanf(contents, "%lu\n%c", &pid, &c);
+  int n = tor_sscanf(contents, "%lu\n%c", &pid, &c);
   tt_int_op(n, OP_EQ, 1);
 
 #ifdef _WIN32
@@ -4819,7 +4804,7 @@ struct testcase_t util_tests[] = {
   UTIL_LEGACY(memarea),
   UTIL_LEGACY(control_formats),
   UTIL_LEGACY(mmap),
-  UTIL_LEGACY(sscanf),
+  UTIL_TEST(sscanf, TT_FORK),
   UTIL_LEGACY(format_time_interval),
   UTIL_LEGACY(path_is_relative),
   UTIL_LEGACY(strtok),

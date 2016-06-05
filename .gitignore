@@ -132,6 +132,9 @@ uptime-*.json
 /src/common/libor.a
 /src/common/libor-testing.a
 /src/common/libor.lib
+/src/common/libor-ctime.a
+/src/common/libor-ctime-testing.a
+/src/common/libor-ctime.lib
 /src/common/libor-crypto.a
 /src/common/libor-crypto-testing.a
 /src/common/libor-crypto.lib
@@ -191,9 +194,6 @@ uptime-*.json
 /src/test/test-switch-id.exe
 /src/test/test-timers.exe
 /src/test/test_workqueue.exe
-/src/test/test_zero_length_keys.sh
-/src/test/test_ntor.sh
-/src/test/test_bt.sh
 
 # /src/tools/
 /src/tools/tor-checkkey

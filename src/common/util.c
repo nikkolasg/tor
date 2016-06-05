@@ -513,21 +513,6 @@ round_uint64_to_next_multiple_of(uint64_t number, uint64_t divisor)
   return number;
 }
 
-/** Return the lowest x in [INT64_MIN, INT64_MAX] such that x is at least
- * <b>number</b>, and x modulo <b>divisor</b> == 0. If no such x can be
- * expressed as an int64_t, return INT64_MAX */
-int64_t
-round_int64_to_next_multiple_of(int64_t number, int64_t divisor)
-{
-  tor_assert(divisor > 0);
-  if (INT64_MAX - divisor + 1 < number)
-    return INT64_MAX;
-  if (number >= 0)
-    number += divisor - 1;
-  number -= number % divisor;
-  return number;
-}
-
 /** Transform a random value <b>p</b> from the uniform distribution in
  * [0.0, 1.0[ into a Laplace distributed value with location parameter
  * <b>mu</b> and scale parameter <b>b</b>. Truncate the final result
@@ -1706,6 +1691,7 @@ parse_iso_time_(const char *cp, time_t *t, int strict)
   st_tm.tm_hour = hour;
   st_tm.tm_min = minute;
   st_tm.tm_sec = second;
+  st_tm.tm_wday = 0; /* Should be ignored. */
 
   if (st_tm.tm_year < 70) {
     char *esc = esc_for_log(cp);
@@ -1773,6 +1759,7 @@ parse_http_time(const char *date, struct tm *tm)
   tm->tm_hour = (int)tm_hour;
   tm->tm_min = (int)tm_min;
   tm->tm_sec = (int)tm_sec;
+  tm->tm_wday = 0; /* Leave this unset. */
 
   month[3] = '\0';
   /* Okay, now decode the month. */
@@ -3060,7 +3047,7 @@ digit_to_num(char d)
  * success, store the result in <b>out</b>, advance bufp to the next
  * character, and return 0.  On failure, return -1. */
 static int
-scan_unsigned(const char **bufp, unsigned long *out, int width, int base)
+scan_unsigned(const char **bufp, unsigned long *out, int width, unsigned base)
 {
   unsigned long result = 0;
   int scanned_so_far = 0;
@@ -3073,7 +3060,7 @@ scan_unsigned(const char **bufp, unsigned long *out, int width, int base)
 
   while (**bufp && (hex?TOR_ISXDIGIT(**bufp):TOR_ISDIGIT(**bufp))
          && scanned_so_far < width) {
-    int digit = hex?hex_decode_digit(*(*bufp)++):digit_to_num(*(*bufp)++);
+    unsigned digit = hex?hex_decode_digit(*(*bufp)++):digit_to_num(*(*bufp)++);
     // Check for overflow beforehand, without actually causing any overflow
     // This preserves functionality on compilers that don't wrap overflow
     // (i.e. that trap or optimise away overflow)
@@ -3119,14 +3106,15 @@ scan_signed(const char **bufp, long *out, int width)
   if (neg && result > 0) {
     if (result > ((unsigned long)LONG_MAX) + 1)
       return -1; /* Underflow */
-    // Avoid overflow on the cast to signed long when result is LONG_MIN
-    // by subtracting 1 from the unsigned long positive value,
-    // then, after it has been cast to signed and negated,
-    // subtracting the original 1 (the double-subtraction is intentional).
-    // Otherwise, the cast to signed could cause a temporary long
-    // to equal LONG_MAX + 1, which is undefined.
-    // We avoid underflow on the subtraction by treating -0 as positive.
-    *out = (-(long)(result - 1)) - 1;
+    else if (result == ((unsigned long)LONG_MAX) + 1)
+      *out = LONG_MIN;
+    else {
+      /* We once had a far more clever no-overflow conversion here, but
+       * some versions of GCC apparently ran it into the ground.  Now
+       * we just check for LONG_MIN explicitly.
+       */
+      *out = -(long)result;
+    }
   } else {
     if (result > LONG_MAX)
       return -1; /* Overflow */
@@ -3272,8 +3260,10 @@ tor_vsscanf(const char *buf, const char *pattern, va_list ap)
           *out = lng;
         } else {
           int *out = va_arg(ap, int *);
+#if LONG_MAX > INT_MAX
           if (lng < INT_MIN || lng > INT_MAX)
             return n_matched;
+#endif
           *out = (int)lng;
         }
         ++pattern;

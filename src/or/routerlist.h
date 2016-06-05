@@ -29,7 +29,7 @@ int trusted_dirs_reload_certs(void);
 #define TRUSTED_DIRS_CERTS_SRC_FROM_VOTE 4
 
 int trusted_dirs_load_certs_from_string(const char *contents, int source,
-                                        int flush);
+                                        int flush, const char *source_dir);
 void trusted_dirs_flush_certs_to_disk(void);
 authority_cert_t *authority_cert_get_newest_by_id(const char *id_digest);
 authority_cert_t *authority_cert_get_by_sk_digest(const char *sk_digest);
@@ -38,7 +38,8 @@ authority_cert_t *authority_cert_get_by_digests(const char *id_digest,
 void authority_cert_get_all(smartlist_t *certs_out);
 void authority_cert_dl_failed(const char *id_digest,
                               const char *signing_key_digest, int status);
-void authority_certs_fetch_missing(networkstatus_t *status, time_t now);
+void authority_certs_fetch_missing(networkstatus_t *status, time_t now,
+                                   const char *dir_hint);
 int router_reload_router_list(void);
 int authority_cert_dl_looks_uncertain(const char *id_digest);
 const smartlist_t *router_get_trusted_dir_servers(void);
@@ -191,7 +192,7 @@ void update_extrainfo_downloads(time_t now);
 void router_reset_descriptor_download_failures(void);
 int router_differences_are_cosmetic(const routerinfo_t *r1,
                                     const routerinfo_t *r2);
-int routerinfo_incompatible_with_extrainfo(const routerinfo_t *ri,
+int routerinfo_incompatible_with_extrainfo(const crypto_pk_t *ri,
                                            extrainfo_t *ei,
                                            signed_descriptor_t *sd,
                                            const char **msg);
@@ -217,17 +218,10 @@ int hex_digest_nickname_matches(const char *hexdigest,
                                 const char *nickname, int is_named);
 
 #ifdef ROUTERLIST_PRIVATE
-/** Helper type for choosing routers by bandwidth: contains a union of
- * double and uint64_t. Before we call scale_array_elements_to_u64, it holds
- * a double; after, it holds a uint64_t. */
-typedef union u64_dbl_t {
-  uint64_t u64;
-  double dbl;
-} u64_dbl_t;
-
-STATIC int choose_array_element_by_weight(const u64_dbl_t *entries,
+STATIC int choose_array_element_by_weight(const uint64_t *entries,
                                           int n_entries);
-STATIC void scale_array_elements_to_u64(u64_dbl_t *entries, int n_entries,
+STATIC void scale_array_elements_to_u64(uint64_t *entries_out,
+                                        const double *entries_in, int n_entries,
                                         uint64_t *total_out);
 STATIC const routerstatus_t *router_pick_directory_server_impl(
                                            dirinfo_type_t auth, int flags,

@@ -67,7 +67,7 @@ typedef struct cert_list_t cert_list_t;
 /* static function prototypes */
 static int compute_weighted_bandwidths(const smartlist_t *sl,
                                        bandwidth_weight_rule_t rule,
-                                       u64_dbl_t **bandwidths_out);
+                                       double **bandwidths_out);
 static const routerstatus_t *router_pick_trusteddirserver_impl(
                 const smartlist_t *sourcelist, dirinfo_type_t auth,
                 int flags, int *n_busy_out);
@@ -287,7 +287,7 @@ trusted_dirs_reload_certs(void)
     return 0;
   r = trusted_dirs_load_certs_from_string(
         contents,
-        TRUSTED_DIRS_CERTS_SRC_FROM_STORE, 1);
+        TRUSTED_DIRS_CERTS_SRC_FROM_STORE, 1, NULL);
   tor_free(contents);
   return r;
 }
@@ -317,16 +317,21 @@ already_have_cert(authority_cert_t *cert)
  * or TRUSTED_DIRS_CERTS_SRC_DL_BY_ID_SK_DIGEST.  If <b>flush</b> is true, we
  * need to flush any changed certificates to disk now.  Return 0 on success,
  * -1 if any certs fail to parse.
+ *
+ * If source_dir is non-NULL, it's the identity digest for a directory that
+ * we've just successfully retrieved certificates from, so try it first to
+ * fetch any missing certificates.
  */
 
 int
 trusted_dirs_load_certs_from_string(const char *contents, int source,
-                                    int flush)
+                                    int flush, const char *source_dir)
 {
   dir_server_t *ds;
   const char *s, *eos;
   int failure_code = 0;
   int from_store = (source == TRUSTED_DIRS_CERTS_SRC_FROM_STORE);
+  int added_trusted_cert = 0;
 
   for (s = contents; *s; s = eos) {
     authority_cert_t *cert = authority_cert_parse_from_string(s, &eos);
@@ -386,6 +391,7 @@ trusted_dirs_load_certs_from_string(const char *contents, int source,
     }
 
     if (ds) {
+      added_trusted_cert = 1;
       log_info(LD_DIR, "Adding %s certificate for directory authority %s with "
                "signing key %s", from_store ? "cached" : "downloaded",
                ds->nickname, hex_str(cert->signing_key_digest,DIGEST_LEN));
@@ -430,8 +436,15 @@ trusted_dirs_load_certs_from_string(const char *contents, int source,
     trusted_dirs_flush_certs_to_disk();
 
   /* call this even if failure_code is <0, since some certs might have
-   * succeeded. */
-  networkstatus_note_certs_arrived();
+   * succeeded, but only pass source_dir if there were no failures,
+   * and at least one more authority certificate was added to the store.
+   * This avoids retrying a directory that's serving bad or entirely duplicate
+   * certificates. */
+  if (failure_code == 0 && added_trusted_cert) {
+    networkstatus_note_certs_arrived(source_dir);
+  } else {
+    networkstatus_note_certs_arrived(NULL);
+  }
 
   return failure_code;
 }
@@ -718,9 +731,14 @@ authority_cert_dl_looks_uncertain(const char *id_digest)
  * <b>status</b>.  Additionally, try to have a non-expired certificate for
  * every V3 authority in trusted_dir_servers.  Don't fetch certificates we
  * already have.
+ *
+ * If dir_hint is non-NULL, it's the identity digest for a directory that
+ * we've just successfully retrieved a consensus or certificates from, so try
+ * it first to fetch any missing certificates.
  **/
 void
-authority_certs_fetch_missing(networkstatus_t *status, time_t now)
+authority_certs_fetch_missing(networkstatus_t *status, time_t now,
+                              const char *dir_hint)
 {
   /*
    * The pending_id digestmap tracks pending certificate downloads by
@@ -884,6 +902,37 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now)
     } SMARTLIST_FOREACH_END(voter);
   }
 
+  /* Look up the routerstatus for the dir_hint  */
+  const routerstatus_t *rs = NULL;
+
+  /* If we still need certificates, try the directory that just successfully
+   * served us a consensus or certificates.
+   * As soon as the directory fails to provide additional certificates, we try
+   * another, randomly selected directory. This avoids continual retries.
+   * (We only ever have one outstanding request per certificate.)
+   *
+   * Bridge clients won't find their bridges using this hint, so they will
+   * fall back to using directory_get_from_dirserver, which selects a bridge.
+   */
+  if (dir_hint) {
+    /* First try the consensus routerstatus, then the fallback
+     * routerstatus */
+    rs = router_get_consensus_status_by_id(dir_hint);
+    if (!rs) {
+      /* This will also find authorities */
+      const dir_server_t *ds = router_get_fallback_dirserver_by_digest(
+                                                                    dir_hint);
+      if (ds) {
+        rs = &ds->fake_status;
+      }
+    }
+
+    if (!rs) {
+      log_warn(LD_BUG, "Directory %s delivered a consensus, but a "
+               "routerstatus could not be found for it.", dir_hint);
+    }
+  }
+
   /* Do downloads by identity digest */
   if (smartlist_len(missing_id_digests) > 0) {
     int need_plus = 0;
@@ -913,11 +962,25 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now)
 
     if (smartlist_len(fps) > 1) {
       resource = smartlist_join_strings(fps, "", 0, NULL);
-      /* We want certs from mirrors, because they will almost always succeed.
-       */
-      directory_get_from_dirserver(DIR_PURPOSE_FETCH_CERTIFICATE, 0,
-                                   resource, PDS_RETRY_IF_NO_SERVERS,
-                                   DL_WANT_ANY_DIRSERVER);
+
+      /* If we've just downloaded a consensus from a directory, re-use that
+       * directory */
+      if (rs) {
+        /* Certificate fetches are one-hop, unless AllDirActionsPrivate is 1 */
+        int get_via_tor = get_options()->AllDirActionsPrivate;
+        const dir_indirection_t indirection = get_via_tor ? DIRIND_ANONYMOUS
+                                                          : DIRIND_ONEHOP;
+        directory_initiate_command_routerstatus(rs,
+                                                DIR_PURPOSE_FETCH_CERTIFICATE,
+                                                0, indirection, resource, NULL,
+                                                0, 0);
+      } else {
+        /* Otherwise, we want certs from a random fallback or directory
+         * mirror, because they will almost always succeed. */
+        directory_get_from_dirserver(DIR_PURPOSE_FETCH_CERTIFICATE, 0,
+                                     resource, PDS_RETRY_IF_NO_SERVERS,
+                                     DL_WANT_ANY_DIRSERVER);
+      }
       tor_free(resource);
     }
     /* else we didn't add any: they were all pending */
@@ -960,11 +1023,25 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now)
 
     if (smartlist_len(fp_pairs) > 1) {
       resource = smartlist_join_strings(fp_pairs, "", 0, NULL);
-      /* We want certs from mirrors, because they will almost always succeed.
-       */
-      directory_get_from_dirserver(DIR_PURPOSE_FETCH_CERTIFICATE, 0,
-                                   resource, PDS_RETRY_IF_NO_SERVERS,
-                                   DL_WANT_ANY_DIRSERVER);
+
+      /* If we've just downloaded a consensus from a directory, re-use that
+       * directory */
+      if (rs) {
+        /* Certificate fetches are one-hop, unless AllDirActionsPrivate is 1 */
+        int get_via_tor = get_options()->AllDirActionsPrivate;
+        const dir_indirection_t indirection = get_via_tor ? DIRIND_ANONYMOUS
+                                                          : DIRIND_ONEHOP;
+        directory_initiate_command_routerstatus(rs,
+                                                DIR_PURPOSE_FETCH_CERTIFICATE,
+                                                0, indirection, resource, NULL,
+                                                0, 0);
+      } else {
+        /* Otherwise, we want certs from a random fallback or directory
+         * mirror, because they will almost always succeed. */
+        directory_get_from_dirserver(DIR_PURPOSE_FETCH_CERTIFICATE, 0,
+                                     resource, PDS_RETRY_IF_NO_SERVERS,
+                                     DL_WANT_ANY_DIRSERVER);
+      }
       tor_free(resource);
     }
     /* else they were all pending */
@@ -1815,20 +1892,23 @@ dirserver_choose_by_weight(const smartlist_t *servers, double authority_weight)
 {
   int n = smartlist_len(servers);
   int i;
-  u64_dbl_t *weights;
+  double *weights_dbl;
+  uint64_t *weights_u64;
   const dir_server_t *ds;
 
-  weights = tor_calloc(n, sizeof(u64_dbl_t));
+  weights_dbl = tor_calloc(n, sizeof(double));
+  weights_u64 = tor_calloc(n, sizeof(uint64_t));
   for (i = 0; i < n; ++i) {
     ds = smartlist_get(servers, i);
-    weights[i].dbl = ds->weight;
+    weights_dbl[i] = ds->weight;
     if (ds->is_authority)
-      weights[i].dbl *= authority_weight;
+      weights_dbl[i] *= authority_weight;
   }
 
-  scale_array_elements_to_u64(weights, n, NULL);
-  i = choose_array_element_by_weight(weights, n);
-  tor_free(weights);
+  scale_array_elements_to_u64(weights_u64, weights_dbl, n, NULL);
+  i = choose_array_element_by_weight(weights_u64, n);
+  tor_free(weights_dbl);
+  tor_free(weights_u64);
   return (i < 0) ? NULL : smartlist_get(servers, i);
 }
 
@@ -2090,7 +2170,8 @@ router_get_advertised_bandwidth_capped(const routerinfo_t *router)
  * much of the range of uint64_t. If <b>total_out</b> is provided, set it to
  * the sum of all elements in the array _before_ scaling. */
 STATIC void
-scale_array_elements_to_u64(u64_dbl_t *entries, int n_entries,
+scale_array_elements_to_u64(uint64_t *entries_out, const double *entries_in,
+                            int n_entries,
                             uint64_t *total_out)
 {
   double total = 0.0;
@@ -2100,13 +2181,13 @@ scale_array_elements_to_u64(u64_dbl_t *entries, int n_entries,
 #define SCALE_TO_U64_MAX ((int64_t) (INT64_MAX / 4))
 
   for (i = 0; i < n_entries; ++i)
-    total += entries[i].dbl;
+    total += entries_in[i];
 
   if (total > 0.0)
     scale_factor = SCALE_TO_U64_MAX / total;
 
   for (i = 0; i < n_entries; ++i)
-    entries[i].u64 = tor_llround(entries[i].dbl * scale_factor);
+    entries_out[i] = tor_llround(entries_in[i] * scale_factor);
 
   if (total_out)
     *total_out = (uint64_t) total;
@@ -2114,35 +2195,20 @@ scale_array_elements_to_u64(u64_dbl_t *entries, int n_entries,
 #undef SCALE_TO_U64_MAX
 }
 
-/** Time-invariant 64-bit greater-than; works on two integers in the range
- * (0,INT64_MAX). */
-#if SIZEOF_VOID_P == 8
-#define gt_i64_timei(a,b) ((a) > (b))
-#else
-static inline int
-gt_i64_timei(uint64_t a, uint64_t b)
-{
-  int64_t diff = (int64_t) (b - a);
-  int res = diff >> 63;
-  return res & 1;
-}
-#endif
-
 /** Pick a random element of <b>n_entries</b>-element array <b>entries</b>,
  * choosing each element with a probability proportional to its (uint64_t)
  * value, and return the index of that element.  If all elements are 0, choose
  * an index at random. Return -1 on error.
  */
 STATIC int
-choose_array_element_by_weight(const u64_dbl_t *entries, int n_entries)
+choose_array_element_by_weight(const uint64_t *entries, int n_entries)
 {
-  int i, i_chosen=-1, n_chosen=0;
-  uint64_t total_so_far = 0;
+  int i;
   uint64_t rand_val;
   uint64_t total = 0;
 
   for (i = 0; i < n_entries; ++i)
-    total += entries[i].u64;
+    total += entries[i];
 
   if (n_entries < 1)
     return -1;
@@ -2154,22 +2220,8 @@ choose_array_element_by_weight(const u64_dbl_t *entries, int n_entries)
 
   rand_val = crypto_rand_uint64(total);
 
-  for (i = 0; i < n_entries; ++i) {
-    total_so_far += entries[i].u64;
-    if (gt_i64_timei(total_so_far, rand_val)) {
-      i_chosen = i;
-      n_chosen++;
-      /* Set rand_val to INT64_MAX rather than stopping the loop. This way,
-       * the time we spend in the loop does not leak which element we chose. */
-      rand_val = INT64_MAX;
-    }
-  }
-  tor_assert(total_so_far == total);
-  tor_assert(n_chosen == 1);
-  tor_assert(i_chosen >= 0);
-  tor_assert(i_chosen < n_entries);
-
-  return i_chosen;
+  return select_array_member_cumulative_timei(
+                           entries, n_entries, total, rand_val);
 }
 
 /** When weighting bridges, enforce these values as lower and upper
@@ -2221,17 +2273,21 @@ static const node_t *
 smartlist_choose_node_by_bandwidth_weights(const smartlist_t *sl,
                                            bandwidth_weight_rule_t rule)
 {
-  u64_dbl_t *bandwidths=NULL;
+  double *bandwidths_dbl=NULL;
+  uint64_t *bandwidths_u64=NULL;
 
-  if (compute_weighted_bandwidths(sl, rule, &bandwidths) < 0)
+  if (compute_weighted_bandwidths(sl, rule, &bandwidths_dbl) < 0)
     return NULL;
 
-  scale_array_elements_to_u64(bandwidths, smartlist_len(sl), NULL);
+  bandwidths_u64 = tor_calloc(smartlist_len(sl), sizeof(uint64_t));
+  scale_array_elements_to_u64(bandwidths_u64, bandwidths_dbl,
+                              smartlist_len(sl), NULL);
 
   {
-    int idx = choose_array_element_by_weight(bandwidths,
+    int idx = choose_array_element_by_weight(bandwidths_u64,
                                              smartlist_len(sl));
-    tor_free(bandwidths);
+    tor_free(bandwidths_dbl);
+    tor_free(bandwidths_u64);
     return idx < 0 ? NULL : smartlist_get(sl, idx);
   }
 }
@@ -2244,14 +2300,14 @@ smartlist_choose_node_by_bandwidth_weights(const smartlist_t *sl,
 static int
 compute_weighted_bandwidths(const smartlist_t *sl,
                             bandwidth_weight_rule_t rule,
-                            u64_dbl_t **bandwidths_out)
+                            double **bandwidths_out)
 {
   int64_t weight_scale;
   double Wg = -1, Wm = -1, We = -1, Wd = -1;
   double Wgb = -1, Wmb = -1, Web = -1, Wdb = -1;
   uint64_t weighted_bw = 0;
   guardfraction_bandwidth_t guardfraction_bw;
-  u64_dbl_t *bandwidths;
+  double *bandwidths;
 
   /* Can't choose exit and guard at same time */
   tor_assert(rule == NO_WEIGHTING ||
@@ -2333,7 +2389,7 @@ compute_weighted_bandwidths(const smartlist_t *sl,
   Web /= weight_scale;
   Wdb /= weight_scale;
 
-  bandwidths = tor_calloc(smartlist_len(sl), sizeof(u64_dbl_t));
+  bandwidths = tor_calloc(smartlist_len(sl), sizeof(double));
 
   // Cycle through smartlist and total the bandwidth.
   static int warned_missing_bw = 0;
@@ -2420,7 +2476,7 @@ compute_weighted_bandwidths(const smartlist_t *sl,
       final_weight = weight*this_bw;
     }
 
-    bandwidths[node_sl_idx].dbl = final_weight + 0.5;
+    bandwidths[node_sl_idx] = final_weight + 0.5;
   } SMARTLIST_FOREACH_END(node);
 
   log_debug(LD_CIRC, "Generated weighted bandwidths for rule %s based "
@@ -2441,7 +2497,7 @@ double
 frac_nodes_with_descriptors(const smartlist_t *sl,
                             bandwidth_weight_rule_t rule)
 {
-  u64_dbl_t *bandwidths = NULL;
+  double *bandwidths = NULL;
   double total, present;
 
   if (smartlist_len(sl) == 0)
@@ -2458,7 +2514,7 @@ frac_nodes_with_descriptors(const smartlist_t *sl,
 
   total = present = 0.0;
   SMARTLIST_FOREACH_BEGIN(sl, const node_t *, node) {
-    const double bw = bandwidths[node_sl_idx].dbl;
+    const double bw = bandwidths[node_sl_idx];
     total += bw;
     if (node_has_descriptor(node))
       present += bw;
@@ -2897,7 +2953,7 @@ routerinfo_free(routerinfo_t *router)
   tor_free(router->onion_curve25519_pkey);
   if (router->identity_pkey)
     crypto_pk_free(router->identity_pkey);
-  tor_cert_free(router->signing_key_cert);
+  tor_cert_free(router->cache_info.signing_key_cert);
   if (router->declared_family) {
     SMARTLIST_FOREACH(router->declared_family, char *, s, tor_free(s));
     smartlist_free(router->declared_family);
@@ -2916,7 +2972,7 @@ extrainfo_free(extrainfo_t *extrainfo)
 {
   if (!extrainfo)
     return;
-  tor_cert_free(extrainfo->signing_key_cert);
+  tor_cert_free(extrainfo->cache_info.signing_key_cert);
   tor_free(extrainfo->cache_info.signed_descriptor_body);
   tor_free(extrainfo->pending_sig);
 
@@ -2932,9 +2988,23 @@ signed_descriptor_free(signed_descriptor_t *sd)
     return;
 
   tor_free(sd->signed_descriptor_body);
+  tor_cert_free(sd->signing_key_cert);
 
   memset(sd, 99, sizeof(signed_descriptor_t)); /* Debug bad mem usage */
   tor_free(sd);
+}
+
+/** Copy src into dest, and steal all references inside src so that when
+ * we free src, we don't mess up dest. */
+static void
+signed_descriptor_move(signed_descriptor_t *dest,
+                       signed_descriptor_t *src)
+{
+  tor_assert(dest != src);
+  memcpy(dest, src, sizeof(signed_descriptor_t));
+  src->signed_descriptor_body = NULL;
+  src->signing_key_cert = NULL;
+  dest->routerlist_index = -1;
 }
 
 /** Extract a signed_descriptor_t from a general routerinfo, and free the
@@ -2946,9 +3016,7 @@ signed_descriptor_from_routerinfo(routerinfo_t *ri)
   signed_descriptor_t *sd;
   tor_assert(ri->purpose == ROUTER_PURPOSE_GENERAL);
   sd = tor_malloc_zero(sizeof(signed_descriptor_t));
-  memcpy(sd, &(ri->cache_info), sizeof(signed_descriptor_t));
-  sd->routerlist_index = -1;
-  ri->cache_info.signed_descriptor_body = NULL;
+  signed_descriptor_move(sd, &ri->cache_info);
   routerinfo_free(ri);
   return sd;
 }
@@ -3126,7 +3194,7 @@ extrainfo_insert,(routerlist_t *rl, extrainfo_t *ei, int warn_if_incompatible))
                      "Mismatch in digest in extrainfo map.");
     goto done;
   }
-  if (routerinfo_incompatible_with_extrainfo(ri, ei, sd,
+  if (routerinfo_incompatible_with_extrainfo(ri->identity_pkey, ei, sd,
                                              &compatibility_error_msg)) {
     char d1[HEX_DIGEST_LEN+1], d2[HEX_DIGEST_LEN+1];
     r = (ri->cache_info.extrainfo_is_bogus) ?
@@ -3434,9 +3502,7 @@ routerlist_reparse_old(routerlist_t *rl, signed_descriptor_t *sd)
                          0, 1, NULL, NULL);
   if (!ri)
     return NULL;
-  memcpy(&ri->cache_info, sd, sizeof(signed_descriptor_t));
-  sd->signed_descriptor_body = NULL; /* Steal reference. */
-  ri->cache_info.routerlist_index = -1;
+  signed_descriptor_move(&ri->cache_info, sd);
 
   routerlist_remove_old(rl, sd, -1);
 
@@ -3692,7 +3758,7 @@ router_add_extrainfo_to_routerlist(extrainfo_t *ei, const char **msg,
   was_router_added_t inserted;
   (void)from_fetch;
   if (msg) *msg = NULL;
-  /*XXXX023 Do something with msg */
+  /*XXXX Do something with msg */
 
   inserted = extrainfo_insert(router_get_routerlist(), ei, !from_cache);
 
@@ -4905,7 +4971,7 @@ update_consensus_router_descriptor_downloads(time_t now, int is_vote,
 
 /** How often should we launch a server/authority request to be sure of getting
  * a guess for our IP? */
-/*XXXX024 this info should come from netinfo cells or something, or we should
+/*XXXX+ this info should come from netinfo cells or something, or we should
  * do this only when we aren't seeing incoming data. see bug 652. */
 #define DUMMY_DOWNLOAD_INTERVAL (20*60)
 
@@ -4916,7 +4982,7 @@ launch_dummy_descriptor_download_as_needed(time_t now,
                                            const or_options_t *options)
 {
   static time_t last_dummy_download = 0;
-  /* XXXX024 we could be smarter here; see notes on bug 652. */
+  /* XXXX+ we could be smarter here; see notes on bug 652. */
   /* If we're a server that doesn't have a configured address, we rely on
    * directory fetches to learn when our address changes.  So if we haven't
    * tried to get any routerdescs in a long time, try a dummy fetch now. */
@@ -5165,25 +5231,32 @@ router_differences_are_cosmetic(const routerinfo_t *r1, const routerinfo_t *r2)
   return 1;
 }
 
-/** Check whether <b>ri</b> (a.k.a. sd) is a router compatible with the
- * extrainfo document
- * <b>ei</b>.  If no router is compatible with <b>ei</b>, <b>ei</b> should be
+/** Check whether <b>sd</b> describes a router descriptor compatible with the
+ * extrainfo document <b>ei</b>.
+ *
+ * <b>identity_pkey</b> (which must also be provided) is RSA1024 identity key
+ * for the router. We use it to check the signature of the extrainfo document,
+ * if it has not already been checked.
+ *
+ * If no router is compatible with <b>ei</b>, <b>ei</b> should be
  * dropped.  Return 0 for "compatible", return 1 for "reject, and inform
  * whoever uploaded <b>ei</b>, and return -1 for "reject silently.".  If
  * <b>msg</b> is present, set *<b>msg</b> to a description of the
  * incompatibility (if any).
+ *
+ * Set the extrainfo_is_bogus field in <b>sd</b> if the digests matched
+ * but the extrainfo was nonetheless incompatible.
  **/
 int
-routerinfo_incompatible_with_extrainfo(const routerinfo_t *ri,
+routerinfo_incompatible_with_extrainfo(const crypto_pk_t *identity_pkey,
                                        extrainfo_t *ei,
                                        signed_descriptor_t *sd,
                                        const char **msg)
 {
   int digest_matches, digest256_matches, r=1;
-  tor_assert(ri);
+  tor_assert(identity_pkey);
+  tor_assert(sd);
   tor_assert(ei);
-  if (!sd)
-    sd = (signed_descriptor_t*)&ri->cache_info;
 
   if (ei->bad_sig) {
     if (msg) *msg = "Extrainfo signature was bad, or signed with wrong key.";
@@ -5195,27 +5268,28 @@ routerinfo_incompatible_with_extrainfo(const routerinfo_t *ri,
   /* Set digest256_matches to 1 if the digest is correct, or if no
    * digest256 was in the ri. */
   digest256_matches = tor_memeq(ei->digest256,
-                                ri->extra_info_digest256, DIGEST256_LEN);
+                                sd->extra_info_digest256, DIGEST256_LEN);
   digest256_matches |=
-    tor_mem_is_zero(ri->extra_info_digest256, DIGEST256_LEN);
+    tor_mem_is_zero(sd->extra_info_digest256, DIGEST256_LEN);
 
   /* The identity must match exactly to have been generated at the same time
    * by the same router. */
-  if (tor_memneq(ri->cache_info.identity_digest,
+  if (tor_memneq(sd->identity_digest,
                  ei->cache_info.identity_digest,
                  DIGEST_LEN)) {
     if (msg) *msg = "Extrainfo nickname or identity did not match routerinfo";
     goto err; /* different servers */
   }
 
-  if (! tor_cert_opt_eq(ri->signing_key_cert, ei->signing_key_cert)) {
+  if (! tor_cert_opt_eq(sd->signing_key_cert,
+                        ei->cache_info.signing_key_cert)) {
     if (msg) *msg = "Extrainfo signing key cert didn't match routerinfo";
     goto err; /* different servers */
   }
 
   if (ei->pending_sig) {
     char signed_digest[128];
-    if (crypto_pk_public_checksig(ri->identity_pkey,
+    if (crypto_pk_public_checksig(identity_pkey,
                        signed_digest, sizeof(signed_digest),
                        ei->pending_sig, ei->pending_sig_len) != DIGEST_LEN ||
         tor_memneq(signed_digest, ei->cache_info.signed_descriptor_digest,
@@ -5226,7 +5300,7 @@ routerinfo_incompatible_with_extrainfo(const routerinfo_t *ri,
       goto err; /* Bad signature, or no match. */
     }
 
-    ei->cache_info.send_unencrypted = ri->cache_info.send_unencrypted;
+    ei->cache_info.send_unencrypted = sd->send_unencrypted;
     tor_free(ei->pending_sig);
   }
 

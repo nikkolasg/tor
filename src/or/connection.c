@@ -98,7 +98,7 @@ static int get_proxy_type(void);
 /** The last addresses that our network interface seemed to have been
  * binding to.  We use this as one way to detect when our IP changes.
  *
- * XXX024 We should really use the entire list of interfaces here.
+ * XXXX+ We should really use the entire list of interfaces here.
  **/
 static tor_addr_t *last_interface_ipv4 = NULL;
 /* DOCDOC last_interface_ipv6 */
@@ -2932,7 +2932,7 @@ static void
 record_num_bytes_transferred(connection_t *conn,
                              time_t now, size_t num_read, size_t num_written)
 {
-  /* XXX024 check if this is necessary */
+  /* XXXX check if this is necessary */
   if (num_written >= INT_MAX || num_read >= INT_MAX) {
     log_err(LD_BUG, "Value out of range. num_read=%lu, num_written=%lu, "
              "connection type=%s, state=%s",
@@ -3759,7 +3759,7 @@ evbuffer_inbuf_callback(struct evbuffer *buf,
     connection_consider_empty_read_buckets(conn);
     if (conn->type == CONN_TYPE_AP) {
       edge_connection_t *edge_conn = TO_EDGE_CONN(conn);
-      /*XXXX024 check for overflow*/
+      /*XXXX++ check for overflow*/
       edge_conn->n_read += (int)info->n_added;
     }
   }
@@ -3780,7 +3780,7 @@ evbuffer_outbuf_callback(struct evbuffer *buf,
     connection_consider_empty_write_buckets(conn);
     if (conn->type == CONN_TYPE_AP) {
       edge_connection_t *edge_conn = TO_EDGE_CONN(conn);
-      /*XXXX024 check for overflow*/
+      /*XXXX++ check for overflow*/
       edge_conn->n_written += (int)info->n_deleted;
     }
   }
@@ -4139,7 +4139,7 @@ connection_handle_write_impl(connection_t *conn, int force)
     or_conn->bytes_xmitted += result;
     or_conn->bytes_xmitted_by_tls += n_written;
     /* So we notice bytes were written even on error */
-    /* XXXX024 This cast is safe since we can never write INT_MAX bytes in a
+    /* XXXX This cast is safe since we can never write INT_MAX bytes in a
      * single set of TLS operations. But it looks kinda ugly. If we refactor
      * the *_buf_tls functions, we should make them return ssize_t or size_t
      * or something. */
@@ -4436,32 +4436,6 @@ connection_get_by_type_state_rendquery(int type, int state,
          ));
 }
 
-#define CONN_FIRST_AND_FREE_TEMPLATE(sl)       \
-  STMT_BEGIN                                   \
-    if (smartlist_len(sl) > 0) {               \
-      void *first_item = smartlist_get(sl, 0); \
-      smartlist_free(sl);                      \
-      return first_item;                       \
-    } else {                                   \
-      smartlist_free(sl);                      \
-      return NULL;                             \
-    }                                          \
-  STMT_END
-
-/** Return a directory connection (if any one exists) that is fetching
- * the item described by <b>purpose</b>/<b>resource</b>, otherwise return NULL.
- */
-dir_connection_t *
-connection_dir_get_by_purpose_and_resource(
-                                           int purpose,
-                                           const char *resource)
-{
-  smartlist_t *conns = connection_dir_list_by_purpose_and_resource(
-                                                          purpose,
-                                                          resource);
-  CONN_FIRST_AND_FREE_TEMPLATE(conns);
-}
-
 /** Return a new smartlist of dir_connection_t * from get_connection_array()
  * that satisfy conn_test on connection_t *conn_var, and dirconn_test on
  * dir_connection_t *dirconn_var. conn_var must be of CONN_TYPE_DIR and not
@@ -4501,25 +4475,6 @@ connection_dir_list_by_purpose_and_resource(
                          0 == strcmp_opt(resource,
                                          dirconn->requested_resource));
 }
-
-/** Return a directory connection (if any one exists) that is fetching
- * the item described by <b>purpose</b>/<b>resource</b>/<b>state</b>,
- * otherwise return NULL. */
-dir_connection_t *
-connection_dir_get_by_purpose_resource_and_state(
-                                                 int purpose,
-                                                 const char *resource,
-                                                 int state)
-{
-  smartlist_t *conns =
-    connection_dir_list_by_purpose_resource_and_state(
-                                                      purpose,
-                                                      resource,
-                                                      state);
-  CONN_FIRST_AND_FREE_TEMPLATE(conns);
-}
-
-#undef CONN_FIRST_AND_FREE_TEMPLATE
 
 /** Return a list of directory connections that are fetching the item
  * described by <b>purpose</b>/<b>resource</b>/<b>state</b>. If there are

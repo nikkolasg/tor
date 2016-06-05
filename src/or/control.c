@@ -1724,8 +1724,6 @@ getinfo_helper_misc(control_connection_t *conn, const char *question,
   } else if (!strcmp(question, "limits/max-mem-in-queues")) {
     tor_asprintf(answer, U64_FORMAT,
                  U64_PRINTF_ARG(get_options()->MaxMemInQueues));
-  } else if (!strcmp(question, "dir-usage")) {
-    *answer = directory_dump_request_log();
   } else if (!strcmp(question, "fingerprint")) {
     crypto_pk_t *server_key;
     if (!server_mode(get_options())) {
@@ -1865,7 +1863,7 @@ getinfo_helper_dir(control_connection_t *control_conn,
         *answer = tor_strndup(body, ri->cache_info.signed_descriptor_len);
     }
   } else if (!strcmpstart(question, "desc/name/")) {
-    /* XXX023 Setting 'warn_if_unnamed' here is a bit silly -- the
+    /* XXX Setting 'warn_if_unnamed' here is a bit silly -- the
      * warning goes to the user, not to the controller. */
     node = node_get_by_nickname(question+strlen("desc/name/"), 1);
     if (node)
@@ -1951,7 +1949,7 @@ getinfo_helper_dir(control_connection_t *control_conn,
       *answer = tor_strndup(md->body, md->bodylen);
     }
   } else if (!strcmpstart(question, "md/name/")) {
-    /* XXX023 Setting 'warn_if_unnamed' here is a bit silly -- the
+    /* XXX Setting 'warn_if_unnamed' here is a bit silly -- the
      * warning goes to the user, not to the controller. */
     const node_t *node = node_get_by_nickname(question+strlen("md/name/"), 1);
     /* XXXX duplicated code */
@@ -2148,6 +2146,7 @@ getinfo_helper_events(control_connection_t *control_conn,
                       const char *question, char **answer,
                       const char **errmsg)
 {
+  const or_options_t *options = get_options();
   (void) control_conn;
   if (!strcmp(question, "circuit-status")) {
     smartlist_t *status = smartlist_new();
@@ -2284,17 +2283,19 @@ getinfo_helper_events(control_connection_t *control_conn,
       *answer = tor_strdup(directories_have_accepted_server_descriptor()
                            ? "1" : "0");
     } else if (!strcmp(question, "status/reachability-succeeded/or")) {
-      *answer = tor_strdup(check_whether_orport_reachable() ? "1" : "0");
+      *answer = tor_strdup(check_whether_orport_reachable(options) ?
+                            "1" : "0");
     } else if (!strcmp(question, "status/reachability-succeeded/dir")) {
-      *answer = tor_strdup(check_whether_dirport_reachable() ? "1" : "0");
+      *answer = tor_strdup(check_whether_dirport_reachable(options) ?
+                            "1" : "0");
     } else if (!strcmp(question, "status/reachability-succeeded")) {
       tor_asprintf(answer, "OR=%d DIR=%d",
-                   check_whether_orport_reachable() ? 1 : 0,
-                   check_whether_dirport_reachable() ? 1 : 0);
+                   check_whether_orport_reachable(options) ? 1 : 0,
+                   check_whether_dirport_reachable(options) ? 1 : 0);
     } else if (!strcmp(question, "status/bootstrap-phase")) {
       *answer = tor_strdup(last_sent_bootstrap_message);
     } else if (!strcmpstart(question, "status/version/")) {
-      int is_server = server_mode(get_options());
+      int is_server = server_mode(options);
       networkstatus_t *c = networkstatus_get_latest_consensus();
       version_status_t status;
       const char *recommended;
@@ -2336,7 +2337,7 @@ getinfo_helper_events(control_connection_t *control_conn,
       }
       *answer = bridge_stats;
     } else if (!strcmp(question, "status/fresh-relay-descs")) {
-      if (!server_mode(get_options())) {
+      if (!server_mode(options)) {
         *errmsg = "Only relays have descriptors";
         return -1;
       }
@@ -2558,7 +2559,6 @@ static const getinfo_item_t getinfo_items[] = {
        "Username under which the tor process is running."),
   ITEM("process/descriptor-limit", misc, "File descriptor limit."),
   ITEM("limits/max-mem-in-queues", misc, "Actual limit on memory in queues"),
-  ITEM("dir-usage", misc, "Breakdown of bytes transferred over DirPort."),
   PREFIX("desc-annotations/id/", dir, "Router annotations by hexdigest."),
   PREFIX("dir/server/", dir,"Router descriptors as retrieved from a DirPort."),
   PREFIX("dir/status/", dir,

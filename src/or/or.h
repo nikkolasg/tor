@@ -14,14 +14,6 @@
 
 #include "orconfig.h"
 
-#if defined(__clang_analyzer__) || defined(__COVERITY__)
-/* If we're building for a static analysis, turn on all the off-by-default
- * features. */
-#ifndef INSTRUMENT_DOWNLOADS
-#define INSTRUMENT_DOWNLOADS 1
-#endif
-#endif
-
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
 #endif
@@ -2070,6 +2062,10 @@ typedef struct signed_descriptor_t {
   time_t published_on;
   /** For routerdescs only: digest of the corresponding extrainfo. */
   char extra_info_digest[DIGEST_LEN];
+  /** For routerdescs only: A SHA256-digest of the extrainfo (if any) */
+  char extra_info_digest256[DIGEST256_LEN];
+  /** Certificate for ed25519 signing key. */
+  struct tor_cert_st *signing_key_cert;
   /** For routerdescs only: Status of downloading the corresponding
    * extrainfo. */
   download_status_t ei_dl_status;
@@ -2101,8 +2097,6 @@ typedef int16_t country_t;
 /** Information about another onion router in the network. */
 typedef struct {
   signed_descriptor_t cache_info;
-  /** A SHA256-digest of the extrainfo (if any) */
-  char extra_info_digest256[DIGEST256_LEN];
   char *nickname; /**< Human-readable OR name. */
 
   uint32_t addr; /**< IPv4 address of OR, in host order. */
@@ -2120,8 +2114,6 @@ typedef struct {
   crypto_pk_t *identity_pkey;  /**< Public RSA key for signing. */
   /** Public curve25519 key for onions */
   curve25519_public_key_t *onion_curve25519_pkey;
-  /** Certificate for ed25519 signing key */
-  struct tor_cert_st *signing_key_cert;
   /** What's the earliest expiration time on all the certs in this
    * routerinfo? */
   time_t cert_expiration_time;
@@ -2197,8 +2189,6 @@ typedef struct extrainfo_t {
   uint8_t digest256[DIGEST256_LEN];
   /** The router's nickname. */
   char nickname[MAX_NICKNAME_LEN+1];
-  /** Certificate for ed25519 signing key */
-  struct tor_cert_st *signing_key_cert;
   /** True iff we found the right key for this extra-info, verified the
    * signature, and found it to be bad. */
   unsigned int bad_sig : 1;
@@ -2965,17 +2955,17 @@ typedef struct circuit_t {
 
   /** When the circuit was first used, or 0 if the circuit is clean.
    *
-   * XXXX023 Note that some code will artifically adjust this value backward
+   * XXXX Note that some code will artifically adjust this value backward
    * in time in order to indicate that a circuit shouldn't be used for new
    * streams, but that it can stay alive as long as it has streams on it.
    * That's a kludge we should fix.
    *
-   * XXX023 The CBT code uses this field to record when HS-related
+   * XXX The CBT code uses this field to record when HS-related
    * circuits entered certain states.  This usage probably won't
    * interfere with this field's primary purpose, but we should
    * document it more thoroughly to make sure of that.
    *
-   * XXX027 The SocksPort option KeepaliveIsolateSOCKSAuth will artificially
+   * XXX The SocksPort option KeepaliveIsolateSOCKSAuth will artificially
    * adjust this value forward each time a suitable stream is attached to an
    * already constructed circuit, potentially keeping the circuit alive
    * indefinitely.
@@ -5067,12 +5057,12 @@ typedef struct rend_encoded_v2_service_descriptor_t {
  * INTRO_POINT_LIFETIME_INTRODUCTIONS INTRODUCE2 cells, it may expire
  * sooner.)
  *
- * XXX023 Should this be configurable? */
+ * XXX Should this be configurable? */
 #define INTRO_POINT_LIFETIME_MIN_SECONDS (18*60*60)
 /** The maximum number of seconds that an introduction point will last
  * before expiring due to old age.
  *
- * XXX023 Should this be configurable? */
+ * XXX Should this be configurable? */
 #define INTRO_POINT_LIFETIME_MAX_SECONDS (24*60*60)
 
 /** The maximum number of circuit creation retry we do to an intro point

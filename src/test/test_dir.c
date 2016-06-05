@@ -85,6 +85,15 @@ test_dir_nicknames(void *arg)
   ;
 }
 
+static smartlist_t *mocked_configured_ports = NULL;
+
+/** Returns mocked_configured_ports */
+static const smartlist_t *
+mock_get_configured_ports(void)
+{
+  return mocked_configured_ports;
+}
+
 /** Run unit tests for router descriptor generation logic. */
 static void
 test_dir_formats(void *arg)
@@ -104,6 +113,7 @@ test_dir_formats(void *arg)
   or_options_t *options = get_options_mutable();
   const addr_policy_t *p;
   time_t now = time(NULL);
+  port_cfg_t orport, dirport;
 
   (void)arg;
   pk1 = pk_generate(0);
@@ -150,15 +160,15 @@ test_dir_formats(void *arg)
   ed25519_secret_key_from_seed(&kp2.seckey,
                           (const uint8_t*)"XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX");
   ed25519_public_key_generate(&kp2.pubkey, &kp2.seckey);
-  r2->signing_key_cert = tor_cert_create(&kp1,
+  r2->cache_info.signing_key_cert = tor_cert_create(&kp1,
                                          CERT_TYPE_ID_SIGNING,
                                          &kp2.pubkey,
                                          now, 86400,
                                          CERT_FLAG_INCLUDE_SIGNING_KEY);
   char cert_buf[256];
   base64_encode(cert_buf, sizeof(cert_buf),
-                (const char*)r2->signing_key_cert->encoded,
-                r2->signing_key_cert->encoded_len,
+                (const char*)r2->cache_info.signing_key_cert->encoded,
+                r2->cache_info.signing_key_cert->encoded_len,
                 BASE64_ENCODE_MULTILINE);
   r2->platform = tor_strdup(platform);
   r2->cache_info.published_on = 5;
@@ -182,11 +192,33 @@ test_dir_formats(void *arg)
   tt_assert(!crypto_pk_write_public_key_to_string(pk2 , &pk2_str,
                                                     &pk2_str_len));
 
-  /* XXXX025 router_dump_to_string should really take this from ri.*/
+  /* XXXX+++ router_dump_to_string should really take this from ri.*/
   options->ContactInfo = tor_strdup("Magri White "
                                     "<magri@elsewhere.example.com>");
+  /* Skip reachability checks for DirPort and tunnelled-dir-server */
+  options->AssumeReachable = 1;
+
+  /* Fake just enough of an ORPort and DirPort to get by */
+  MOCK(get_configured_ports, mock_get_configured_ports);
+  mocked_configured_ports = smartlist_new();
+
+  memset(&orport, 0, sizeof(orport));
+  orport.type = CONN_TYPE_OR_LISTENER;
+  orport.addr.family = AF_INET;
+  orport.port = 9000;
+  smartlist_add(mocked_configured_ports, &orport);
+
+  memset(&dirport, 0, sizeof(dirport));
+  dirport.type = CONN_TYPE_DIR_LISTENER;
+  dirport.addr.family = AF_INET;
+  dirport.port = 9003;
+  smartlist_add(mocked_configured_ports, &dirport);
 
   buf = router_dump_router_to_string(r1, pk2, NULL, NULL, NULL);
+
+  UNMOCK(get_configured_ports);
+  smartlist_free(mocked_configured_ports);
+  mocked_configured_ports = NULL;
 
   tor_free(options->ContactInfo);
   tt_assert(buf);
@@ -247,7 +279,8 @@ test_dir_formats(void *arg)
   strlcat(buf2, "master-key-ed25519 ", sizeof(buf2));
   {
     char k[ED25519_BASE64_LEN+1];
-    tt_assert(ed25519_public_to_base64(k, &r2->signing_key_cert->signing_key)
+    tt_assert(ed25519_public_to_base64(k,
+                                &r2->cache_info.signing_key_cert->signing_key)
               >= 0);
     strlcat(buf2, k, sizeof(buf2));
     strlcat(buf2, "\n", sizeof(buf2));
@@ -308,6 +341,16 @@ test_dir_formats(void *arg)
   strlcat(buf2, "tunnelled-dir-server\n", sizeof(buf2));
   strlcat(buf2, "router-sig-ed25519 ", sizeof(buf2));
 
+  /* Fake just enough of an ORPort to get by */
+  MOCK(get_configured_ports, mock_get_configured_ports);
+  mocked_configured_ports = smartlist_new();
+
+  memset(&orport, 0, sizeof(orport));
+  orport.type = CONN_TYPE_OR_LISTENER;
+  orport.addr.family = AF_INET;
+  orport.port = 9005;
+  smartlist_add(mocked_configured_ports, &orport);
+
   buf = router_dump_router_to_string(r2, pk1, pk2, &r2_onion_keypair, &kp2);
   tt_assert(buf);
   buf[strlen(buf2)] = '\0'; /* Don't compare the sig; it's never the same
@@ -317,6 +360,10 @@ test_dir_formats(void *arg)
   tor_free(buf);
 
   buf = router_dump_router_to_string(r2, pk1, NULL, NULL, NULL);
+
+  UNMOCK(get_configured_ports);
+  smartlist_free(mocked_configured_ports);
+  mocked_configured_ports = NULL;
 
   /* Reset for later */
   cp = buf;
@@ -2149,56 +2196,57 @@ test_dir_scale_bw(void *testdata)
                   1.0/7,
                   12.0,
                   24.0 };
-  u64_dbl_t vals[8];
+  double vals_dbl[8];
+  uint64_t vals_u64[8];
   uint64_t total;
   int i;
 
   (void) testdata;
 
   for (i=0; i<8; ++i)
-    vals[i].dbl = v[i];
+    vals_dbl[i] = v[i];
 
-  scale_array_elements_to_u64(vals, 8, &total);
+  scale_array_elements_to_u64(vals_u64, vals_dbl, 8, &total);
 
   tt_int_op((int)total, OP_EQ, 48);
   total = 0;
   for (i=0; i<8; ++i) {
-    total += vals[i].u64;
+    total += vals_u64[i];
   }
   tt_assert(total >= (U64_LITERAL(1)<<60));
   tt_assert(total <= (U64_LITERAL(1)<<62));
 
   for (i=0; i<8; ++i) {
     /* vals[2].u64 is the scaled value of 1.0 */
-    double ratio = ((double)vals[i].u64) / vals[2].u64;
+    double ratio = ((double)vals_u64[i]) / vals_u64[2];
     tt_double_op(fabs(ratio - v[i]), OP_LT, .00001);
   }
 
   /* test handling of no entries */
   total = 1;
-  scale_array_elements_to_u64(vals, 0, &total);
+  scale_array_elements_to_u64(vals_u64, vals_dbl, 0, &total);
   tt_assert(total == 0);
 
   /* make sure we don't read the array when we have no entries
    * may require compiler flags to catch NULL dereferences */
   total = 1;
-  scale_array_elements_to_u64(NULL, 0, &total);
+  scale_array_elements_to_u64(NULL, NULL, 0, &total);
   tt_assert(total == 0);
 
-  scale_array_elements_to_u64(NULL, 0, NULL);
+  scale_array_elements_to_u64(NULL, NULL, 0, NULL);
 
   /* test handling of zero totals */
   total = 1;
-  vals[0].dbl = 0.0;
-  scale_array_elements_to_u64(vals, 1, &total);
+  vals_dbl[0] = 0.0;
+  scale_array_elements_to_u64(vals_u64, vals_dbl, 1, &total);
   tt_assert(total == 0);
-  tt_assert(vals[0].u64 == 0);
+  tt_assert(vals_u64[0] == 0);
 
-  vals[0].dbl = 0.0;
-  vals[1].dbl = 0.0;
-  scale_array_elements_to_u64(vals, 2, NULL);
-  tt_assert(vals[0].u64 == 0);
-  tt_assert(vals[1].u64 == 0);
+  vals_dbl[0] = 0.0;
+  vals_dbl[1] = 0.0;
+  scale_array_elements_to_u64(vals_u64, vals_dbl, 2, NULL);
+  tt_assert(vals_u64[0] == 0);
+  tt_assert(vals_u64[1] == 0);
 
  done:
   ;
@@ -2209,7 +2257,7 @@ test_dir_random_weighted(void *testdata)
 {
   int histogram[10];
   uint64_t vals[10] = {3,1,2,4,6,0,7,5,8,9}, total=0;
-  u64_dbl_t inp[10];
+  uint64_t inp_u64[10];
   int i, choice;
   const int n = 50000;
   double max_sq_error;
@@ -2219,12 +2267,12 @@ test_dir_random_weighted(void *testdata)
    * in a scrambled order to make sure we don't depend on order. */
   memset(histogram,0,sizeof(histogram));
   for (i=0; i<10; ++i) {
-    inp[i].u64 = vals[i];
+    inp_u64[i] = vals[i];
     total += vals[i];
   }
   tt_u64_op(total, OP_EQ, 45);
   for (i=0; i<n; ++i) {
-    choice = choose_array_element_by_weight(inp, 10);
+    choice = choose_array_element_by_weight(inp_u64, 10);
     tt_int_op(choice, OP_GE, 0);
     tt_int_op(choice, OP_LT, 10);
     histogram[choice]++;
@@ -2251,16 +2299,16 @@ test_dir_random_weighted(void *testdata)
 
   /* Now try a singleton; do we choose it? */
   for (i = 0; i < 100; ++i) {
-    choice = choose_array_element_by_weight(inp, 1);
+    choice = choose_array_element_by_weight(inp_u64, 1);
     tt_int_op(choice, OP_EQ, 0);
   }
 
   /* Now try an array of zeros.  We should choose randomly. */
   memset(histogram,0,sizeof(histogram));
   for (i = 0; i < 5; ++i)
-    inp[i].u64 = 0;
+    inp_u64[i] = 0;
   for (i = 0; i < n; ++i) {
-    choice = choose_array_element_by_weight(inp, 5);
+    choice = choose_array_element_by_weight(inp_u64, 5);
     tt_int_op(choice, OP_GE, 0);
     tt_int_op(choice, OP_LT, 5);
     histogram[choice]++;
@@ -3995,12 +4043,56 @@ test_dir_choose_compression_level(void* data)
   done: ;
 }
 
+static int mock_networkstatus_consensus_is_bootstrapping_value = 0;
+static int
+mock_networkstatus_consensus_is_bootstrapping(time_t now)
+{
+  (void)now;
+  return mock_networkstatus_consensus_is_bootstrapping_value;
+}
+
+static int mock_networkstatus_consensus_can_use_extra_fallbacks_value = 0;
+static int
+mock_networkstatus_consensus_can_use_extra_fallbacks(
+                                                  const or_options_t *options)
+{
+  (void)options;
+  return mock_networkstatus_consensus_can_use_extra_fallbacks_value;
+}
+
+/* data is a 2 character nul-terminated string.
+ * If data[0] is 'b', set bootstrapping, anything else means not bootstrapping
+ * If data[1] is 'f', set extra fallbacks, anything else means no extra
+ * fallbacks.
+ */
 static void
 test_dir_find_dl_schedule(void* data)
 {
+  const char *str = (const char *)data;
+
+  tt_assert(strlen(data) == 2);
+
+  if (str[0] == 'b') {
+    mock_networkstatus_consensus_is_bootstrapping_value = 1;
+  } else {
+    mock_networkstatus_consensus_is_bootstrapping_value = 0;
+  }
+
+  if (str[1] == 'f') {
+    mock_networkstatus_consensus_can_use_extra_fallbacks_value = 1;
+  } else {
+    mock_networkstatus_consensus_can_use_extra_fallbacks_value = 0;
+  }
+
+  MOCK(networkstatus_consensus_is_bootstrapping,
+       mock_networkstatus_consensus_is_bootstrapping);
+  MOCK(networkstatus_consensus_can_use_extra_fallbacks,
+       mock_networkstatus_consensus_can_use_extra_fallbacks);
+
   download_status_t dls;
-  smartlist_t server, client, server_cons, client_cons, bridge;
-  (void)data;
+  smartlist_t server, client, server_cons, client_cons;
+  smartlist_t client_boot_auth_only_cons, client_boot_auth_cons;
+  smartlist_t client_boot_fallback_cons, bridge;
 
   mock_options = malloc(sizeof(or_options_t));
   reset_options(mock_options, &mock_get_options_calls);
@@ -4010,42 +4102,120 @@ test_dir_find_dl_schedule(void* data)
   mock_options->TestingClientDownloadSchedule = &client;
   mock_options->TestingServerConsensusDownloadSchedule = &server_cons;
   mock_options->TestingClientConsensusDownloadSchedule = &client_cons;
+  mock_options->ClientBootstrapConsensusAuthorityOnlyDownloadSchedule =
+    &client_boot_auth_only_cons;
+  mock_options->ClientBootstrapConsensusAuthorityDownloadSchedule =
+    &client_boot_auth_cons;
+  mock_options->ClientBootstrapConsensusFallbackDownloadSchedule =
+    &client_boot_fallback_cons;
   mock_options->TestingBridgeDownloadSchedule = &bridge;
 
   dls.schedule = DL_SCHED_GENERIC;
+  /* client */
   mock_options->ClientOnly = 1;
   tt_ptr_op(find_dl_schedule(&dls, mock_options), OP_EQ, &client);
   mock_options->ClientOnly = 0;
+
+  /* dir mode */
   mock_options->DirPort_set = 1;
-  mock_options->ORPort_set = 1;
   mock_options->DirCache = 1;
   tt_ptr_op(find_dl_schedule(&dls, mock_options), OP_EQ, &server);
-
-#if 0
-  dls.schedule = DL_SCHED_CONSENSUS;
-  mock_options->ClientOnly = 1;
+  mock_options->DirPort_set = 0;
   mock_options->DirCache = 0;
-  tt_ptr_op(find_dl_schedule(&dls, mock_options), OP_EQ, &client_cons);
-  mock_options->ClientOnly = 0;
-  mock_options->DirCache = 1;
+
+  dls.schedule = DL_SCHED_CONSENSUS;
+  /* public server mode */
+  mock_options->ORPort_set = 1;
   tt_ptr_op(find_dl_schedule(&dls, mock_options), OP_EQ, &server_cons);
-#endif
+  mock_options->ORPort_set = 0;
+
+  /* client and bridge modes */
+  if (networkstatus_consensus_is_bootstrapping(time(NULL))) {
+    if (networkstatus_consensus_can_use_extra_fallbacks(mock_options)) {
+      dls.want_authority = 1;
+      /* client */
+      mock_options->ClientOnly = 1;
+      tt_ptr_op(find_dl_schedule(&dls, mock_options), OP_EQ,
+                &client_boot_auth_cons);
+      mock_options->ClientOnly = 0;
+
+      /* bridge relay */
+      mock_options->ORPort_set = 1;
+      mock_options->BridgeRelay = 1;
+      tt_ptr_op(find_dl_schedule(&dls, mock_options), OP_EQ,
+                &client_boot_auth_cons);
+      mock_options->ORPort_set = 0;
+      mock_options->BridgeRelay = 0;
+
+      dls.want_authority = 0;
+      /* client */
+      mock_options->ClientOnly = 1;
+      tt_ptr_op(find_dl_schedule(&dls, mock_options), OP_EQ,
+                &client_boot_fallback_cons);
+      mock_options->ClientOnly = 0;
+
+      /* bridge relay */
+      mock_options->ORPort_set = 1;
+      mock_options->BridgeRelay = 1;
+      tt_ptr_op(find_dl_schedule(&dls, mock_options), OP_EQ,
+                &client_boot_fallback_cons);
+      mock_options->ORPort_set = 0;
+      mock_options->BridgeRelay = 0;
+
+    } else {
+      /* dls.want_authority is ignored */
+      /* client */
+      mock_options->ClientOnly = 1;
+      tt_ptr_op(find_dl_schedule(&dls, mock_options), OP_EQ,
+                &client_boot_auth_only_cons);
+      mock_options->ClientOnly = 0;
+
+      /* bridge relay */
+      mock_options->ORPort_set = 1;
+      mock_options->BridgeRelay = 1;
+      tt_ptr_op(find_dl_schedule(&dls, mock_options), OP_EQ,
+                &client_boot_auth_only_cons);
+      mock_options->ORPort_set = 0;
+      mock_options->BridgeRelay = 0;
+    }
+  } else {
+    /* client */
+    mock_options->ClientOnly = 1;
+    tt_ptr_op(find_dl_schedule(&dls, mock_options), OP_EQ,
+              &client_cons);
+    mock_options->ClientOnly = 0;
+
+    /* bridge relay */
+    mock_options->ORPort_set = 1;
+    mock_options->BridgeRelay = 1;
+    tt_ptr_op(find_dl_schedule(&dls, mock_options), OP_EQ,
+              &client_cons);
+    mock_options->ORPort_set = 0;
+    mock_options->BridgeRelay = 0;
+  }
 
   dls.schedule = DL_SCHED_BRIDGE;
+  /* client */
   mock_options->ClientOnly = 1;
-  tt_ptr_op(find_dl_schedule(&dls, mock_options), OP_EQ, &bridge);
-  mock_options->ClientOnly = 0;
   tt_ptr_op(find_dl_schedule(&dls, mock_options), OP_EQ, &bridge);
 
  done:
+  UNMOCK(networkstatus_consensus_is_bootstrapping);
+  UNMOCK(networkstatus_consensus_can_use_extra_fallbacks);
   UNMOCK(get_options);
+  free(mock_options);
+  mock_options = NULL;
 }
 
-#define DIR_LEGACY(name)                                                   \
+#define DIR_LEGACY(name)                             \
   { #name, test_dir_ ## name , TT_FORK, NULL, NULL }
 
 #define DIR(name,flags)                              \
   { #name, test_dir_##name, (flags), NULL, NULL }
+
+/* where arg is a string constant */
+#define DIR_ARG(name,flags,arg)                      \
+  { #name "_" arg, test_dir_##name, (flags), &passthrough_setup, (void*) arg }
 
 struct testcase_t dir_tests[] = {
   DIR_LEGACY(nicknames),
@@ -4081,7 +4251,10 @@ struct testcase_t dir_tests[] = {
   DIR(should_not_init_request_to_dir_auths_without_v3_info, 0),
   DIR(should_init_request_to_dir_auths, 0),
   DIR(choose_compression_level, 0),
-  DIR(find_dl_schedule, 0),
+  DIR_ARG(find_dl_schedule, TT_FORK, "bf"),
+  DIR_ARG(find_dl_schedule, TT_FORK, "ba"),
+  DIR_ARG(find_dl_schedule, TT_FORK, "cf"),
+  DIR_ARG(find_dl_schedule, TT_FORK, "ca"),
   END_OF_TESTCASES
 };
 

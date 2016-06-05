@@ -258,11 +258,11 @@ dirserv_router_get_status(const routerinfo_t *router, const char **msg,
     return FP_REJECT;
   }
 
-  if (router->signing_key_cert) {
+  if (router->cache_info.signing_key_cert) {
     /* This has an ed25519 identity key. */
     if (KEYPIN_MISMATCH ==
         keypin_check((const uint8_t*)router->cache_info.identity_digest,
-                     router->signing_key_cert->signing_key.pubkey)) {
+                   router->cache_info.signing_key_cert->signing_key.pubkey)) {
       log_fn(severity, LD_DIR,
              "Descriptor from router %s has an Ed25519 key, "
                "but the <rsa,ed25519> keys don't match what they were before.",
@@ -630,10 +630,10 @@ dirserv_add_descriptor(routerinfo_t *ri, const char **msg, const char *source)
 
   /* Do keypinning again ... this time, to add the pin if appropriate */
   int keypin_status;
-  if (ri->signing_key_cert) {
+  if (ri->cache_info.signing_key_cert) {
     keypin_status = keypin_check_and_add(
       (const uint8_t*)ri->cache_info.identity_digest,
-      ri->signing_key_cert->signing_key.pubkey,
+      ri->cache_info.signing_key_cert->signing_key.pubkey,
       ! key_pinning);
   } else {
     keypin_status = keypin_check_lone_rsa(
@@ -692,12 +692,14 @@ dirserv_add_descriptor(routerinfo_t *ri, const char **msg, const char *source)
 static was_router_added_t
 dirserv_add_extrainfo(extrainfo_t *ei, const char **msg)
 {
-  const routerinfo_t *ri;
+  routerinfo_t *ri;
   int r;
   tor_assert(msg);
   *msg = NULL;
 
-  ri = router_get_by_id_digest(ei->cache_info.identity_digest);
+  /* Needs to be mutable so routerinfo_incompatible_with_extrainfo
+   * can mess with some of the flags in ri->cache_info. */
+  ri = router_get_mutable_by_digest(ei->cache_info.identity_digest);
   if (!ri) {
     *msg = "No corresponding router descriptor for extra-info descriptor";
     extrainfo_free(ei);
@@ -717,7 +719,8 @@ dirserv_add_extrainfo(extrainfo_t *ei, const char **msg)
     return ROUTER_BAD_EI;
   }
 
-  if ((r = routerinfo_incompatible_with_extrainfo(ri, ei, NULL, msg))) {
+  if ((r = routerinfo_incompatible_with_extrainfo(ri->identity_pkey, ei,
+                                                  &ri->cache_info, msg))) {
     extrainfo_free(ei);
     return r < 0 ? ROUTER_IS_ALREADY_KNOWN : ROUTER_BAD_EI;
   }
@@ -821,7 +824,7 @@ running_long_enough_to_decide_unreachable(void)
 void
 dirserv_set_router_is_running(routerinfo_t *router, time_t now)
 {
-  /*XXXX024 This function is a mess.  Separate out the part that calculates
+  /*XXXX This function is a mess.  Separate out the part that calculates
     whether it's reachable and the part that tells rephist that the router was
     unreachable.
    */
@@ -983,94 +986,6 @@ router_is_active(const routerinfo_t *ri, const node_t *node, time_t now)
   return 1;
 }
 
-/** Generate a new v1 directory and write it into a newly allocated string.
- * Point *<b>dir_out</b> to the allocated string.  Sign the
- * directory with <b>private_key</b>.  Return 0 on success, -1 on
- * failure. If <b>complete</b> is set, give us all the descriptors;
- * otherwise leave out non-running and non-valid ones.
- */
-int
-dirserv_dump_directory_to_string(char **dir_out,
-                                 crypto_pk_t *private_key)
-{
-  /* XXXX 024 Get rid of this function if we can confirm that nobody's
-   * fetching these any longer */
-  char *cp;
-  char *identity_pkey; /* Identity key, DER64-encoded. */
-  char *recommended_versions;
-  char digest[DIGEST_LEN];
-  char published[ISO_TIME_LEN+1];
-  char *buf = NULL;
-  size_t buf_len;
-  size_t identity_pkey_len;
-  time_t now = time(NULL);
-
-  tor_assert(dir_out);
-  *dir_out = NULL;
-
-  if (crypto_pk_write_public_key_to_string(private_key,&identity_pkey,
-                                           &identity_pkey_len)<0) {
-    log_warn(LD_BUG,"write identity_pkey to string failed!");
-    return -1;
-  }
-
-  recommended_versions =
-    format_versions_list(get_options()->RecommendedVersions);
-
-  format_iso_time(published, now);
-
-  buf_len = 2048+strlen(recommended_versions);
-
-  buf = tor_malloc(buf_len);
-  /* We'll be comparing against buf_len throughout the rest of the
-     function, though strictly speaking we shouldn't be able to exceed
-     it.  This is C, after all, so we may as well check for buffer
-     overruns.*/
-
-  tor_snprintf(buf, buf_len,
-               "signed-directory\n"
-               "published %s\n"
-               "recommended-software %s\n"
-               "router-status %s\n"
-               "dir-signing-key\n%s\n",
-               published, recommended_versions, "",
-               identity_pkey);
-
-  tor_free(recommended_versions);
-  tor_free(identity_pkey);
-
-  cp = buf + strlen(buf);
-  *cp = '\0';
-
-  /* These multiple strlcat calls are inefficient, but dwarfed by the RSA
-     signature. */
-  if (strlcat(buf, "directory-signature ", buf_len) >= buf_len)
-    goto truncated;
-  if (strlcat(buf, get_options()->Nickname, buf_len) >= buf_len)
-    goto truncated;
-  if (strlcat(buf, "\n", buf_len) >= buf_len)
-    goto truncated;
-
-  if (router_get_dir_hash(buf,digest)) {
-    log_warn(LD_BUG,"couldn't compute digest");
-    tor_free(buf);
-    return -1;
-  }
-  note_crypto_pk_op(SIGN_DIR);
-  if (router_append_dirobj_signature(buf,buf_len,digest,DIGEST_LEN,
-                                     private_key)<0) {
-    tor_free(buf);
-    return -1;
-  }
-
-  *dir_out = buf;
-  return 0;
- truncated:
-  log_warn(LD_BUG,"tried to exceed string length.");
-  tor_free(buf);
-  return -1;
-}
-
 /********************************************************************/
 
 /* A set of functions to answer questions about how we'd like to behave
@@ -1132,8 +1047,11 @@ directory_caches_unknown_auth_certs(const or_options_t *options)
   return dir_server_mode(options) || options->BridgeRelay;
 }
 
-/** Return 1 if we want to keep descriptors, networkstatuses, etc around
- * and we're willing to serve them to others. Else return 0.
+/** Return 1 if we want to keep descriptors, networkstatuses, etc around.
+ * Else return 0.
+ * Check options->DirPort_set and directory_permits_begindir_requests()
+ * to see if we are willing to serve these directory documents to others via
+ * the DirPort and begindir-over-ORPort, respectively.
  */
 int
 directory_caches_dir_info(const or_options_t *options)
@@ -1324,7 +1242,7 @@ dirserv_thinks_router_is_unreliable(time_t now,
 {
   if (need_uptime) {
     if (!enough_mtbf_info) {
-      /* XXX024 Once most authorities are on v3, we should change the rule from
+      /* XXXX We should change the rule from
        * "use uptime if we don't have mtbf data" to "don't advertise Stable on
        * v3 if we don't have enough mtbf data."  Or maybe not, since if we ever
        * hit a point where we need to reset a lot of authorities at once,
@@ -2137,9 +2055,9 @@ routers_make_ed_keys_unique(smartlist_t *routers)
 
   SMARTLIST_FOREACH_BEGIN(routers, routerinfo_t *, ri) {
     ri->omit_from_vote = 0;
-    if (ri->signing_key_cert == NULL)
+    if (ri->cache_info.signing_key_cert == NULL)
       continue; /* No ed key */
-    const uint8_t *pk = ri->signing_key_cert->signing_key.pubkey;
+    const uint8_t *pk = ri->cache_info.signing_key_cert->signing_key.pubkey;
     if ((ri2 = digest256map_get(by_ed_key, pk))) {
       /* Duplicate; must omit one.  Set the omit_from_vote flag in whichever
        * one has the earlier published_on. */
@@ -2893,8 +2811,9 @@ dirserv_generate_networkstatus_vote_obj(crypto_pk_t *private_key,
       set_routerstatus_from_routerinfo(rs, node, ri, now,
                                        listbadexits);
 
-      if (ri->signing_key_cert) {
-        memcpy(vrs->ed25519_id, ri->signing_key_cert->signing_key.pubkey,
+      if (ri->cache_info.signing_key_cert) {
+        memcpy(vrs->ed25519_id,
+               ri->cache_info.signing_key_cert->signing_key.pubkey,
                ED25519_PUBKEY_LEN);
       }
 
@@ -3335,7 +3254,7 @@ lookup_cached_dir_by_fp(const char *fp)
     d = strmap_get(cached_consensuses, "ns");
   } else if (memchr(fp, '\0', DIGEST_LEN) && cached_consensuses &&
            (d = strmap_get(cached_consensuses, fp))) {
-    /* this here interface is a nasty hack XXXX024 */;
+    /* this here interface is a nasty hack XXXX */;
   }
   return d;
 }

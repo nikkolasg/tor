@@ -1,4 +1,4 @@
- /* Copyright (c) 2001 Matej Pfajfar.
+/* Copyright (c) 2001 Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
  * Copyright (c) 2007-2016, The Tor Project, Inc. */
@@ -1405,7 +1405,8 @@ router_parse_entry_from_string(const char *s, const char *end,
         log_warn(LD_DIR, "Couldn't parse ed25519 cert");
         goto err;
       }
-      router->signing_key_cert = cert; /* makes sure it gets freed. */
+      /* makes sure it gets freed. */
+      router->cache_info.signing_key_cert = cert;
 
       if (cert->cert_type != CERT_TYPE_ID_SIGNING ||
           ! cert->signing_key_included) {
@@ -1601,8 +1602,8 @@ router_parse_entry_from_string(const char *s, const char *end,
     }
 
     if (tok->n_args >= 2) {
-      if (digest256_from_base64(router->extra_info_digest256, tok->args[1])
-          < 0) {
+      if (digest256_from_base64(router->cache_info.extra_info_digest256,
+                                tok->args[1]) < 0) {
         log_warn(LD_DIR, "Invalid extra info digest256 %s",
                  escaped(tok->args[1]));
       }
@@ -1787,7 +1788,9 @@ extrainfo_parse_entry_from_string(const char *s, const char *end,
         log_warn(LD_DIR, "Couldn't parse ed25519 cert");
         goto err;
       }
-      extrainfo->signing_key_cert = cert; /* makes sure it gets freed. */
+      /* makes sure it gets freed. */
+      extrainfo->cache_info.signing_key_cert = cert;
+
       if (cert->cert_type != CERT_TYPE_ID_SIGNING ||
           ! cert->signing_key_included) {
         log_warn(LD_DIR, "Invalid form for ed25519 cert");
@@ -1979,7 +1982,7 @@ authority_cert_parse_from_string(const char *s, const char **end_of_string)
     struct in_addr in;
     char *address = NULL;
     tor_assert(tok->n_args);
-    /* XXX024 use some tor_addr parse function below instead. -RD */
+    /* XXX++ use some tor_addr parse function below instead. -RD */
     if (tor_addr_port_split(LOG_WARN, tok->args[0], &address,
                             &cert->dir_port) < 0 ||
         tor_inet_aton(address, &in) == 0) {
@@ -3506,7 +3509,7 @@ networkstatus_parse_detached_signatures(const char *s, const char *eos)
     digest_algorithm_t alg;
     const char *flavor;
     const char *hexdigest;
-    size_t expected_length;
+    size_t expected_length, digest_length;
 
     tok = _tok;
 
@@ -3529,8 +3532,8 @@ networkstatus_parse_detached_signatures(const char *s, const char *eos)
       continue;
     }
 
-    expected_length =
-      (alg == DIGEST_SHA1) ? HEX_DIGEST_LEN : HEX_DIGEST256_LEN;
+    digest_length = crypto_digest_algorithm_get_length(alg);
+    expected_length = digest_length * 2; /* hex encoding */
 
     if (strlen(hexdigest) != expected_length) {
       log_warn(LD_DIR, "Wrong length on consensus-digest in detached "
@@ -3539,15 +3542,13 @@ networkstatus_parse_detached_signatures(const char *s, const char *eos)
     }
     digests = detached_get_digests(sigs, flavor);
     tor_assert(digests);
-    if (!tor_mem_is_zero(digests->d[alg], DIGEST256_LEN)) {
+    if (!tor_mem_is_zero(digests->d[alg], digest_length)) {
       log_warn(LD_DIR, "Multiple digests for %s with %s on detached "
                "signatures document", flavor, algname);
       continue;
     }
-    // XXX Should it not be always DIGEST256_LEN ? Running the tests with
-    // the condition ` != DIGEST256_LEN` fails.
-    if (base16_decode(digests->d[alg], DIGEST256_LEN,
-                      hexdigest, strlen(hexdigest)) < 0) {
+    if (base16_decode(digests->d[alg], digest_length,
+                      hexdigest, strlen(hexdigest)) < digest_length) {
       log_warn(LD_DIR, "Bad encoding on consensus-digest in detached "
                "networkstatus signatures");
       goto err;
@@ -4974,7 +4975,7 @@ rend_parse_v2_service_descriptor(rend_service_descriptor_t **parsed_out,
     eos = eos + 1;
   /* Check length. */
   if (eos-desc > REND_DESC_MAX_SIZE) {
-    /* XXX023 If we are parsing this descriptor as a server, this
+    /* XXXX+ If we are parsing this descriptor as a server, this
      * should be a protocol warning. */
     log_warn(LD_REND, "Descriptor length is %d which exceeds "
              "maximum rendezvous descriptor size of %d bytes.",

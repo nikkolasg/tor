@@ -106,6 +106,7 @@ format_networkstatus_vote(crypto_pk_t *private_signing_key,
     SMARTLIST_FOREACH(v3_ns->package_lines, const char *, p,
                       if (validate_recommended_package_line(p))
                         smartlist_add_asprintf(tmp, "package %s\n", p));
+    smartlist_sort_strings(tmp);
     packages = smartlist_join_strings(tmp, "", 0, NULL);
     SMARTLIST_FOREACH(tmp, char *, cp, tor_free(cp));
     smartlist_free(tmp);
@@ -2916,7 +2917,8 @@ dirvote_add_vote(const char *vote_body, const char **msg_out, int *status_out)
     /* Hey, it's a new cert! */
     trusted_dirs_load_certs_from_string(
                                vote->cert->cache_info.signed_descriptor_body,
-                               TRUSTED_DIRS_CERTS_SRC_FROM_VOTE, 1 /*flush*/);
+                               TRUSTED_DIRS_CERTS_SRC_FROM_VOTE, 1 /*flush*/,
+                               NULL);
     if (!authority_cert_get_by_digests(vote->cert->cache_info.identity_digest,
                                        vote->cert->signing_key_digest)) {
       log_warn(LD_BUG, "We added a cert, but still couldn't find it.");
@@ -3019,6 +3021,30 @@ dirvote_add_vote(const char *vote_body, const char **msg_out, int *status_out)
   return any_failed ? NULL : pending_vote;
 }
 
+/* Write the votes in <b>pending_vote_list</b> to disk. */
+static void
+write_v3_votes_to_disk(const smartlist_t *pending_vote_list)
+{
+  smartlist_t *votestrings = smartlist_new();
+  char *votefile = NULL;
+
+  SMARTLIST_FOREACH(pending_vote_list, pending_vote_t *, v,
+    {
+      sized_chunk_t *c = tor_malloc(sizeof(sized_chunk_t));
+      c->bytes = v->vote_body->dir;
+      c->len = v->vote_body->dir_len;
+      smartlist_add(votestrings, c); /* collect strings to write to disk */
+    });
+
+  votefile = get_datadir_fname("v3-status-votes");
+  write_chunks_to_file(votefile, votestrings, 0, 0);
+  log_debug(LD_DIR, "Wrote votes to disk (%s)!", votefile);
+
+  tor_free(votefile);
+  SMARTLIST_FOREACH(votestrings, sized_chunk_t *, c, tor_free(c));
+  smartlist_free(votestrings);
+}
+
 /** Try to compute a v3 networkstatus consensus from the currently pending
  * votes.  Return 0 on success, -1 on failure.  Store the consensus in
  * pending_consensus: it won't be ready to be published until we have
@@ -3028,8 +3054,8 @@ dirvote_compute_consensuses(void)
 {
   /* Have we got enough votes to try? */
   int n_votes, n_voters, n_vote_running = 0;
-  smartlist_t *votes = NULL, *votestrings = NULL;
-  char *consensus_body = NULL, *signatures = NULL, *votefile;
+  smartlist_t *votes = NULL;
+  char *consensus_body = NULL, *signatures = NULL;
   networkstatus_t *consensus = NULL;
   authority_cert_t *my_cert;
   pending_consensus_t pending[N_CONSENSUS_FLAVORS];
@@ -3040,6 +3066,17 @@ dirvote_compute_consensuses(void)
   if (!pending_vote_list)
     pending_vote_list = smartlist_new();
 
+  /* Write votes to disk */
+  write_v3_votes_to_disk(pending_vote_list);
+
+  /* Setup votes smartlist */
+  votes = smartlist_new();
+  SMARTLIST_FOREACH(pending_vote_list, pending_vote_t *, v,
+    {
+      smartlist_add(votes, v->vote); /* collect votes to compute consensus */
+    });
+
+  /* See if consensus managed to achieve majority */
   n_voters = get_n_authorities(V3_DIRINFO);
   n_votes = smartlist_len(pending_vote_list);
   if (n_votes <= n_voters/2) {
@@ -3065,24 +3102,6 @@ dirvote_compute_consensuses(void)
     log_warn(LD_DIR, "Can't generate consensus without a certificate.");
     goto err;
   }
-
-  votes = smartlist_new();
-  votestrings = smartlist_new();
-  SMARTLIST_FOREACH(pending_vote_list, pending_vote_t *, v,
-    {
-      sized_chunk_t *c = tor_malloc(sizeof(sized_chunk_t));
-      c->bytes = v->vote_body->dir;
-      c->len = v->vote_body->dir_len;
-      smartlist_add(votestrings, c); /* collect strings to write to disk */
-
-      smartlist_add(votes, v->vote); /* collect votes to compute consensus */
-    });
-
-  votefile = get_datadir_fname("v3-status-votes");
-  write_chunks_to_file(votefile, votestrings, 0, 0);
-  tor_free(votefile);
-  SMARTLIST_FOREACH(votestrings, sized_chunk_t *, c, tor_free(c));
-  smartlist_free(votestrings);
 
   {
     char legacy_dbuf[DIGEST_LEN];
@@ -3373,7 +3392,7 @@ dirvote_publish_consensus(void)
       continue;
     }
 
-    if (networkstatus_set_current_consensus(pending->body, name, 0))
+    if (networkstatus_set_current_consensus(pending->body, name, 0, NULL))
       log_warn(LD_DIR, "Error publishing %s consensus", name);
     else
       log_notice(LD_DIR, "Published %s consensus", name);
@@ -3515,7 +3534,7 @@ dirvote_create_microdescriptor(const routerinfo_t *ri, int consensus_method)
 
   if (consensus_method >= MIN_METHOD_FOR_P6_LINES &&
       ri->ipv6_exit_policy) {
-    /* XXXX024 This doesn't match proposal 208, which says these should
+    /* XXXX+++ This doesn't match proposal 208, which says these should
      * be taken unchanged from the routerinfo.  That's bogosity, IMO:
      * the proposal should have said to do this instead.*/
     char *p6 = write_short_policy(ri->ipv6_exit_policy);
@@ -3528,10 +3547,11 @@ dirvote_create_microdescriptor(const routerinfo_t *ri, int consensus_method)
     char idbuf[ED25519_BASE64_LEN+1];
     const char *keytype;
     if (consensus_method >= MIN_METHOD_FOR_ED25519_ID_IN_MD &&
-        ri->signing_key_cert &&
-        ri->signing_key_cert->signing_key_included) {
+        ri->cache_info.signing_key_cert &&
+        ri->cache_info.signing_key_cert->signing_key_included) {
       keytype = "ed25519";
-      ed25519_public_to_base64(idbuf, &ri->signing_key_cert->signing_key);
+      ed25519_public_to_base64(idbuf,
+                               &ri->cache_info.signing_key_cert->signing_key);
     } else {
       keytype = "rsa1024";
       digest_to_base64(idbuf, ri->cache_info.identity_digest);

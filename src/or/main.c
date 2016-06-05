@@ -962,7 +962,7 @@ conn_close_if_marked(int i)
           connection_stop_writing(conn);
         }
         if (connection_is_reading(conn)) {
-          /* XXXX024 We should make this code unreachable; if a connection is
+          /* XXXX+ We should make this code unreachable; if a connection is
            * marked for close and flushing, there is no point in reading to it
            * at all. Further, checking at this point is a bit of a hack: it
            * would make much more sense to react in
@@ -1483,17 +1483,6 @@ run_scheduled_events(time_t now)
   if (authdir_mode_v3(options)) {
     dirvote_act(options, now);
   }
-
-  /* 2d. Cleanup excess consensus bootstrap connections every second.
-   * connection_dir_close_consensus_conn_if_extra() closes some connections
-   * that are clearly excess, but this check is more thorough.
-   * This only closes connections if there is more than one consensus
-   * connection, and at least one of those connections is already downloading
-   * (during bootstrap), or connecting (just after the bootstrap consensus is
-   * downloaded).
-   * It won't close any consensus connections initiated after bootstrap,
-   * because those attempts are made one at a time. */
-  connection_dir_close_extra_consensus_conns();
 
   /* 3a. Every second, we examine pending circuits and prune the
    *    ones which have been pending for more than a few seconds.
@@ -2094,7 +2083,7 @@ second_elapsed_callback(periodic_timer_t *timer, void *arg)
         TIMEOUT_UNTIL_UNREACHABILITY_COMPLAINT) {
     /* every 20 minutes, check and complain if necessary */
     const routerinfo_t *me = router_get_my_routerinfo();
-    if (me && !check_whether_orport_reachable()) {
+    if (me && !check_whether_orport_reachable(options)) {
       char *address = tor_dup_ip(me->addr);
       log_warn(LD_CONFIG,"Your server (%s:%d) has not managed to confirm that "
                "its ORPort is reachable. Relays do not publish descriptors "
@@ -2107,7 +2096,7 @@ second_elapsed_callback(periodic_timer_t *timer, void *arg)
       tor_free(address);
     }
 
-    if (me && !check_whether_dirport_reachable()) {
+    if (me && !check_whether_dirport_reachable(options)) {
       char *address = tor_dup_ip(me->addr);
       log_warn(LD_CONFIG,
                "Your server (%s:%d) has not managed to confirm that its "

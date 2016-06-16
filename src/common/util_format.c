@@ -328,7 +328,7 @@ static const uint8_t base64_decode_table[256] = {
 /** base64_decode_impl takes care of decoding the <b>src</b> buffer
  * and write the results into the <b>dest</b> buffer.
  * <b>WARNING</b>: This method does NOT check input and output sizes. It is the
- * responsability of base64_decode{_nopad}. IT SHOULD NEVER BE CALLED FOR
+ * responsibility of base64_decode{_nopad}. IT SHOULD NEVER BE CALLED FOR
  * FOR DECODING A BASE64 STRING DIRECTLY. Use base64_decode and
  * base64_decode_nopad.
  * */
@@ -430,6 +430,9 @@ int
 base64_decode_nopad(uint8_t *dest, size_t destlen,
                     const char *src, size_t srclen)
 {
+  if (srclen % 4 == 1)
+      return -1;
+
   if (srclen > SIZE_T_CEILING - 4)
     return -1;
 
@@ -439,31 +442,7 @@ base64_decode_nopad(uint8_t *dest, size_t destlen,
   if (destlen > SIZE_T_CEILING)
     return -1;
 
-  char *buf = tor_malloc(srclen + 4);
-  memcpy(buf, src, srclen+1);
-  size_t buflen;
-  switch (srclen % 4)
-    {
-    case 0:
-    default:
-      buflen = srclen;
-      break;
-    case 1:
-      tor_free(buf);
-      return -1;
-    case 2:
-      memcpy(buf+srclen, "==", 3);
-      buflen = srclen + 2;
-      break;
-    case 3:
-      memcpy(buf+srclen, "=", 2);
-      buflen = srclen + 1;
-      break;
-  }
-
-  int n = base64_decode_impl((char*)dest, destlen, buf, buflen);
-  tor_free(buf);
-  return n;
+  return base64_decode_impl((char*)dest, destlen, src, srclen);
 }
 
 #undef X

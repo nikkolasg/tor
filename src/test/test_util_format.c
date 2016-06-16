@@ -156,6 +156,7 @@ test_util_format_base64_decode_nopad(void *ignored)
   char src2[] = "SGksdGhpc2lzYXRlc3Rmb3JiYXNlNjRkZWNvZGVub3BhZGZ1bmN0aW";
   uint8_t dst2[40];
   char dst2_expected[] = "Hi,thisisatestforbase64decodenopadfuncti";
+  char src3[] = "d3JvbmdzaXpldGV4d";
   src = tor_malloc_zero(256);
   dst = tor_malloc_zero(1000);
   real_dst = tor_malloc_zero(10);
@@ -188,6 +189,9 @@ test_util_format_base64_decode_nopad(void *ignored)
   res = base64_decode_nopad(dst2,40,src2,54);
   tt_mem_op(dst2,OP_EQ,dst2_expected,40)
   tt_int_op(res,OP_EQ,40);
+
+  res = base64_decode_nopad(dst, 1000, src3, strlen(src3));
+  tt_int_op(res, OP_EQ, -1);
  done:
   tor_free(src);
   tor_free(dst);

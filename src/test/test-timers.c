@@ -23,10 +23,10 @@
 #define MAX_DURATION 30
 #define N_DISABLE 5
 
-static struct timeval fire_at[N_TIMERS] = {{0,0}};
+static struct timeval fire_at[N_TIMERS] = { {0,0} };
 static int is_disabled[N_TIMERS] = {0};
 static int fired[N_TIMERS] = {0};
-static struct timeval difference[N_TIMERS] = {{0,0}};
+static struct timeval difference[N_TIMERS] = { {0,0} };
 static tor_timer_t *timers[N_TIMERS] = {NULL};
 
 static int n_active_timers = 0;

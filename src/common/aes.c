@@ -23,6 +23,8 @@
 #error "We require OpenSSL >= 1.0.0"
 #endif
 
+DISABLE_GCC_WARNING(redundant-decls)
+
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +32,9 @@
 #include <openssl/evp.h>
 #include <openssl/engine.h>
 #include <openssl/modes.h>
+
+ENABLE_GCC_WARNING(redundant-decls)
+
 #include "compat.h"
 #include "aes.h"
 #include "util.h"
@@ -233,9 +238,11 @@ evaluate_ctr_for_aes(void)
 
   if (fast_memneq(output, encrypt_zero, 16)) {
     /* Counter mode is buggy */
+    /* LCOV_EXCL_START */
     log_err(LD_CRYPTO, "This OpenSSL has a buggy version of counter mode; "
                   "quitting tor.");
     exit(1);
+    /* LCOV_EXCL_STOP */
   }
   return 0;
 }
@@ -278,7 +285,7 @@ aes_set_key(aes_cnt_cipher_t *cipher, const char *key, int key_bits)
       case 128: c = EVP_aes_128_ecb(); break;
       case 192: c = EVP_aes_192_ecb(); break;
       case 256: c = EVP_aes_256_ecb(); break;
-      default: tor_assert(0);
+      default: tor_assert(0); // LCOV_EXCL_LINE
     }
     EVP_EncryptInit(&cipher->key.evp, c, (const unsigned char*)key, NULL);
     cipher->using_evp = 1;

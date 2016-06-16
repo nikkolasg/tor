@@ -322,7 +322,6 @@ already_have_cert(authority_cert_t *cert)
  * we've just successfully retrieved certificates from, so try it first to
  * fetch any missing certificates.
  */
-
 int
 trusted_dirs_load_certs_from_string(const char *contents, int source,
                                     int flush, const char *source_dir)
@@ -2177,22 +2176,20 @@ scale_array_elements_to_u64(uint64_t *entries_out, const double *entries_in,
   double total = 0.0;
   double scale_factor = 0.0;
   int i;
-  /* big, but far away from overflowing an int64_t */
-#define SCALE_TO_U64_MAX ((int64_t) (INT64_MAX / 4))
 
   for (i = 0; i < n_entries; ++i)
     total += entries_in[i];
 
-  if (total > 0.0)
-    scale_factor = SCALE_TO_U64_MAX / total;
+  if (total > 0.0) {
+    scale_factor = ((double)INT64_MAX) / total;
+    scale_factor /= 4.0; /* make sure we're very far away from overflowing */
+  }
 
   for (i = 0; i < n_entries; ++i)
     entries_out[i] = tor_llround(entries_in[i] * scale_factor);
 
   if (total_out)
     *total_out = (uint64_t) total;
-
-#undef SCALE_TO_U64_MAX
 }
 
 /** Pick a random element of <b>n_entries</b>-element array <b>entries</b>,
@@ -4731,7 +4728,7 @@ max_dl_per_request(const or_options_t *options, int purpose)
   }
   /* If we're going to tunnel our connections, we can ask for a lot more
    * in a request. */
-  if (!directory_fetches_from_authorities(options)) {
+  if (directory_must_use_begindir(options)) {
     max = 500;
   }
   return max;

@@ -155,11 +155,13 @@ tor_malloc_(size_t size DMALLOC_PARAMS)
 #endif
 
   if (PREDICT_UNLIKELY(result == NULL)) {
+    /* LCOV_EXCL_START */
     log_err(LD_MM,"Out of memory on malloc(). Dying.");
     /* If these functions die within a worker process, they won't call
      * spawn_exit, but that's ok, since the parent will run out of memory soon
      * anyway. */
     exit(1);
+    /* LCOV_EXCL_STOP */
   }
   return result;
 }
@@ -204,6 +206,15 @@ size_mul_check(const size_t x, const size_t y)
           x <= SIZE_MAX / y);
 }
 
+#ifdef TOR_UNIT_TESTS
+/** Exposed for unit tests only */
+int
+size_mul_check__(const size_t x, const size_t y)
+{
+  return size_mul_check(x,y);
+}
+#endif
+
 /** Allocate a chunk of <b>nmemb</b>*<b>size</b> bytes of memory, fill
  * the memory with zero bytes, and return a pointer to the result.
  * Log and terminate the process on error.  (Same as
@@ -243,8 +254,10 @@ tor_realloc_(void *ptr, size_t size DMALLOC_PARAMS)
 #endif
 
   if (PREDICT_UNLIKELY(result == NULL)) {
+    /* LCOV_EXCL_START */
     log_err(LD_MM,"Out of memory on realloc(). Dying.");
     exit(1);
+    /* LCOV_EXCL_STOP */
   }
   return result;
 }
@@ -279,8 +292,10 @@ tor_strdup_(const char *s DMALLOC_PARAMS)
   dup = strdup(s);
 #endif
   if (PREDICT_UNLIKELY(dup == NULL)) {
+    /* LCOV_EXCL_START */
     log_err(LD_MM,"Out of memory on strdup(). Dying.");
     exit(1);
+    /* LCOV_EXCL_STOP */
   }
   return dup;
 }
@@ -342,6 +357,7 @@ tor_free_(void *mem)
   tor_free(mem);
 }
 
+DISABLE_GCC_WARNING(aggregate-return)
 /** Call the platform malloc info function, and dump the results to the log at
  * level <b>severity</b>.  If no such function exists, do nothing. */
 void
@@ -369,6 +385,7 @@ tor_log_mallinfo(int severity)
                       );
 #endif
 }
+ENABLE_GCC_WARNING(aggregate-return)
 
 /* =====
  * Math
@@ -1378,7 +1395,7 @@ tv_udiff(const struct timeval *start, const struct timeval *end)
   long udiff;
   long secdiff = end->tv_sec - start->tv_sec;
 
-  if (labs(secdiff+1) > LONG_MAX/1000000) {
+  if (labs(secdiff)+1 > LONG_MAX/1000000) {
     log_warn(LD_GENERAL, "comparing times on microsecond detail too far "
              "apart: %ld seconds", secdiff);
     return LONG_MAX;
@@ -1396,7 +1413,7 @@ tv_mdiff(const struct timeval *start, const struct timeval *end)
   long mdiff;
   long secdiff = end->tv_sec - start->tv_sec;
 
-  if (labs(secdiff+1) > LONG_MAX/1000) {
+  if (labs(secdiff)+1 > LONG_MAX/1000) {
     log_warn(LD_GENERAL, "comparing times on millisecond detail too far "
              "apart: %ld seconds", secdiff);
     return LONG_MAX;
@@ -1404,7 +1421,13 @@ tv_mdiff(const struct timeval *start, const struct timeval *end)
 
   /* Subtract and round */
   mdiff = secdiff*1000L +
-      ((long)end->tv_usec - (long)start->tv_usec + 500L) / 1000L;
+      /* We add a million usec here to ensure that the result is positive,
+       * so that the round-towards-zero behavior of the division will give
+       * the right result for rounding to the nearest msec. Later we subtract
+       * 1000 in order to get the correct result.
+       */
+      ((long)end->tv_usec - (long)start->tv_usec + 500L + 1000000L) / 1000L
+      - 1000;
   return mdiff;
 }
 
@@ -1606,11 +1629,16 @@ parse_rfc1123_time(const char *buf, time_t *t)
   tm.tm_sec = (int)tm_sec;
 
   if (tm.tm_year < 1970) {
+    /* LCOV_EXCL_START
+     * XXXX I think this is dead code; we already checked for
+     *      invalid_year above. */
+    tor_assert_nonfatal_unreached();
     char *esc = esc_for_log(buf);
     log_warn(LD_GENERAL,
              "Got invalid RFC1123 time %s. (Before 1970)", esc);
     tor_free(esc);
     return -1;
+    /* LCOV_EXCL_STOP */
   }
   tm.tm_year -= 1900;
 
@@ -1694,10 +1722,15 @@ parse_iso_time_(const char *cp, time_t *t, int strict)
   st_tm.tm_wday = 0; /* Should be ignored. */
 
   if (st_tm.tm_year < 70) {
+    /* LCOV_EXCL_START
+     * XXXX I think this is dead code; we already checked for
+     *      year < 1970 above. */
+    tor_assert_nonfatal_unreached();
     char *esc = esc_for_log(cp);
     log_warn(LD_GENERAL, "Got invalid ISO time %s. (Before 1970)", esc);
     tor_free(esc);
     return -1;
+    /* LCOV_EXCL_STOP */
   }
   return tor_timegm(&st_tm, t);
 }
@@ -1888,6 +1921,8 @@ rate_limit_log(ratelim_t *lim, time_t now)
       return tor_strdup("");
     } else {
       char *cp=NULL;
+      /* XXXX this is not exactly correct: the messages could have occurred
+       * any time between the old value of lim->allowed and now. */
       tor_asprintf(&cp,
                    " [%d similar message(s) suppressed in last %d seconds]",
                    n-1, lim->rate);
@@ -2788,9 +2823,11 @@ unescape_string(const char *s, char **result, size_t *size_out)
         if (size_out) *size_out = out - *result;
         return cp+1;
       case '\0':
+        /* LCOV_EXCL_START -- we caught this in parse_config_from_line. */
         tor_fragile_assert();
         tor_free(*result);
         return NULL;
+        /* LCOV_EXCL_STOP */
       case '\\':
         switch (cp[1])
           {
@@ -2804,8 +2841,12 @@ unescape_string(const char *s, char **result, size_t *size_out)
               x1 = hex_decode_digit(cp[2]);
               x2 = hex_decode_digit(cp[3]);
               if (x1 == -1 || x2 == -1) {
-                  tor_free(*result);
-                  return NULL;
+                /* LCOV_EXCL_START */
+                /* we caught this above in the initial loop. */
+                tor_assert_nonfatal_unreached();
+                tor_free(*result);
+                return NULL;
+                /* LCOV_EXCL_STOP */
               }
 
               *out++ = ((x1<<4) + x2);
@@ -2831,7 +2872,11 @@ unescape_string(const char *s, char **result, size_t *size_out)
             cp += 2;
             break;
           default:
+            /* LCOV_EXCL_START */
+            /* we caught this above in the initial loop. */
+            tor_assert_nonfatal_unreached();
             tor_free(*result); return NULL;
+            /* LCOV_EXCL_STOP */
           }
         break;
       default:
@@ -3466,13 +3511,17 @@ start_daemon(void)
   start_daemon_called = 1;
 
   if (pipe(daemon_filedes)) {
+    /* LCOV_EXCL_START */
     log_err(LD_GENERAL,"pipe failed; exiting. Error was %s", strerror(errno));
     exit(1);
+    /* LCOV_EXCL_STOP */
   }
   pid = fork();
   if (pid < 0) {
+    /* LCOV_EXCL_START */
     log_err(LD_GENERAL,"fork failed. Exiting.");
     exit(1);
+    /* LCOV_EXCL_STOP */
   }
   if (pid) {  /* Parent */
     int ok;
@@ -3534,8 +3583,10 @@ finish_daemon(const char *desired_cwd)
 
   nullfd = tor_open_cloexec("/dev/null", O_RDWR, 0);
   if (nullfd < 0) {
+    /* LCOV_EXCL_START */
     log_err(LD_GENERAL,"/dev/null can't be opened. Exiting.");
     exit(1);
+    /* LCOV_EXCL_STOP */
   }
   /* close fds linking to invoking terminal, but
    * close usual incoming fds, but redirect them somewhere
@@ -3544,8 +3595,10 @@ finish_daemon(const char *desired_cwd)
   if (dup2(nullfd,0) < 0 ||
       dup2(nullfd,1) < 0 ||
       dup2(nullfd,2) < 0) {
+    /* LCOV_EXCL_START */
     log_err(LD_GENERAL,"dup2 failed. Exiting.");
     exit(1);
+    /* LCOV_EXCL_STOP */
   }
   if (nullfd > 2)
     close(nullfd);
@@ -3742,7 +3795,7 @@ format_number_sigsafe(unsigned long x, char *buf, int buf_len,
 
   /* NOT tor_assert; see above. */
   if (cp != buf) {
-    abort();
+    abort(); // LCOV_EXCL_LINE
   }
 
   return len;
@@ -4320,7 +4373,7 @@ tor_spawn_background(const char *const filename, const char **argv,
 
     _exit(255);
     /* Never reached, but avoids compiler warning */
-    return status;
+    return status; // LCOV_EXCL_LINE
   }
 
   /* In parent */
@@ -5528,7 +5581,7 @@ clamp_double_to_int64(double number)
    * representable integer for which this is not the case is INT64_MIN, but
    * it is covered by the logic below. */
   if (isfinite(number) && exp <= 63) {
-    return number;
+    return (int64_t)number;
   }
 
   /* Handle infinities and finite numbers with magnitude >= 2^63. */

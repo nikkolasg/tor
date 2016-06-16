@@ -294,6 +294,17 @@ base64_encode_nopad(char *dest, size_t destlen,
   return (int)(out - dest);
 }
 
+/** As base64_decode, but do not require any padding on the input */
+int
+base64_decode_nopad(uint8_t *dest, size_t destlen,
+                    const char *src, size_t srclen)
+{
+  if (srclen > SIZE_T_CEILING - 4)
+    return -1;
+
+  return  base64_decode((char*)dest, destlen, src, srclen);
+}
+
 #undef BASE64_OPENSSL_LINELEN
 
 /** @{ */
@@ -325,20 +336,34 @@ static const uint8_t base64_decode_table[256] = {
   X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X,
 };
 
-/** base64_decode_impl takes care of decoding the <b>src</b> buffer
- * and write the results into the <b>dest</b> buffer.
- * <b>WARNING</b>: This method does NOT check input and output sizes. It is the
- * responsibility of base64_decode{_nopad}. IT SHOULD NEVER BE CALLED FOR
- * FOR DECODING A BASE64 STRING DIRECTLY. Use base64_decode and
- * base64_decode_nopad.
- * */
-static int
-base64_decode_impl(char *dest, size_t destlen, const char *src,
-                   size_t srclen) {
+/** Base64 decode <b>srclen</b> bytes of data from <b>src</b>.  Write
+ * the result into <b>dest</b>, if it will fit within <b>destlen</b>
+ * bytes.  Return the number of bytes written on success; -1 if
+ * destlen is too short, or other failure.
+ *
+ * NOTE 1: destlen is checked conservatively, as though srclen contained no
+ * spaces or padding.
+ *
+ * NOTE 2: This implementation does not check for the correct number of
+ * padding "=" characters at the end of the string, and does not check
+ * for internal padding characters.
+ */
+int
+base64_decode(char *dest, size_t destlen, const char *src, size_t srclen)
+{
   const char *eos = src+srclen;
   uint32_t n=0;
   int n_idx=0;
   char *dest_orig = dest;
+
+  /* Max number of bits == srclen*6.
+   * Number of bytes required to hold all bits == (srclen*6)/8.
+   * Yes, we want to round down: anything that hangs over the end of a
+   * byte is padding. */
+  if (destlen < (srclen*3)/4)
+    return -1;
+  if (destlen > SIZE_T_CEILING)
+    return -1;
 
   memset(dest, 0, destlen);
 
@@ -397,54 +422,6 @@ base64_decode_impl(char *dest, size_t destlen, const char *src,
 
   return (int)(dest-dest_orig);
 }
-
-/** Base64 decode <b>srclen</b> bytes of data from <b>src</b>.  Write
- * the result into <b>dest</b>, if it will fit within <b>destlen</b>
- * bytes.  Return the number of bytes written on success; -1 if
- * destlen is too short, or other failure.
- *
- * NOTE 1: destlen is checked conservatively, as though srclen contained no
- * spaces or padding.
- *
- * NOTE 2: This implementation does not check for the correct number of
- * padding "=" characters at the end of the string, and does not check
- * for internal padding characters.
- */
-int
-base64_decode(char *dest, size_t destlen, const char *src, size_t srclen)
-{
-  /* Max number of bits == srclen*6.
-   * Number of bytes required to hold all bits == (srclen*6)/8.
-   * Yes, we want to round down: anything that hangs over the end of a
-   * byte is padding. */
-  if (destlen < (srclen*3)/4)
-    return -1;
-  if (destlen > SIZE_T_CEILING)
-    return -1;
-
-  return base64_decode_impl(dest,destlen,src,srclen);
-}
-
-/** As base64_decode, but do not require any padding on the input */
-int
-base64_decode_nopad(uint8_t *dest, size_t destlen,
-                    const char *src, size_t srclen)
-{
-  if (srclen % 4 == 1)
-      return -1;
-
-  if (srclen > SIZE_T_CEILING - 4)
-    return -1;
-
-  if (destlen < (srclen*3)/4)
-    return -1;
-
-  if (destlen > SIZE_T_CEILING)
-    return -1;
-
-  return base64_decode_impl((char*)dest, destlen, src, srclen);
-}
-
 #undef X
 #undef SP
 #undef PAD

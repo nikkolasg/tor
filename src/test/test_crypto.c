@@ -1390,19 +1390,11 @@ test_crypto_digest_names(void *arg)
   int i;
   for (i = 0; names[i].n; ++i) {
     tt_str_op(names[i].n, OP_EQ,crypto_digest_algorithm_get_name(names[i].a));
-<<<<<<< HEAD
-    tt_int_op(names[i].a, OP_EQ,
-            crypto_digest_algorithm_parse_name(names[i].n));
-  }
-  tt_int_op(-1, OP_EQ,
-          crypto_digest_algorithm_parse_name("TimeCubeHash-4444"));
-=======
     tt_int_op(names[i].a,
               OP_EQ,crypto_digest_algorithm_parse_name(names[i].n));
   }
   tt_int_op(-1, OP_EQ,
             crypto_digest_algorithm_parse_name("TimeCubeHash-4444"));
->>>>>>> master
  done:
   ;
 }

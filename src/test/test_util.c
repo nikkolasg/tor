@@ -30,6 +30,9 @@
 #include <ctype.h>
 #include <float.h>
 
+#define INFINITY_DBL ((double)INFINITY)
+#define NAN_DBL ((double)NAN)
+
 /* XXXX this is a minimal wrapper to make the unit tests compile with the
  * changed tor_timegm interface. */
 static time_t
@@ -258,7 +261,7 @@ test_util_time(void *arg)
   int i;
   struct timeval tv;
 
-  /* Test tv_udiff */
+  /* Test tv_udiff and tv_mdiff */
 
   (void)arg;
   start.tv_sec = 5;
@@ -268,22 +271,36 @@ test_util_time(void *arg)
   end.tv_usec = 5000;
 
   tt_int_op(0L,OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(0L,OP_EQ, tv_mdiff(&start, &end));
 
   end.tv_usec = 7000;
 
   tt_int_op(2000L,OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(2L,OP_EQ, tv_mdiff(&start, &end));
 
   end.tv_sec = 6;
 
   tt_int_op(1002000L,OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(1002L,OP_EQ, tv_mdiff(&start, &end));
 
   end.tv_usec = 0;
 
   tt_int_op(995000L,OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(995L,OP_EQ, tv_mdiff(&start, &end));
 
   end.tv_sec = 4;
 
   tt_int_op(-1005000L,OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(-1005L,OP_EQ, tv_mdiff(&start, &end));
+
+#ifdef _WIN32
+  /* Would you believe that tv_sec is a long on windows? Of course you would.*/
+  end.tv_sec = LONG_MAX;
+#else
+  end.tv_sec = TIME_MAX;
+#endif
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
 
   /* Test tor_timegm & tor_gmtime_r */
 
@@ -622,9 +639,16 @@ test_util_time(void *arg)
             parse_rfc1123_time("Wed, 30 Ene 2011 23:59:59 GMT", &t_res));
   tt_int_op(-1,OP_EQ,
             parse_rfc1123_time("Wed, 30 Mar 2011 23:59:59 GM", &t_res));
+  tt_int_op(-1,OP_EQ,
+            parse_rfc1123_time("Wed, 30 Mar 1900 23:59:59 GMT", &t_res));
 
+  /* Leap year. */
   tt_int_op(-1,OP_EQ,
             parse_rfc1123_time("Wed, 29 Feb 2011 16:00:00 GMT", &t_res));
+  tt_int_op(0,OP_EQ,
+            parse_rfc1123_time("Wed, 29 Feb 2012 16:00:00 GMT", &t_res));
+
+  /* Leap second plus one */
   tt_int_op(-1,OP_EQ,
             parse_rfc1123_time("Wed, 30 Mar 2011 23:59:61 GMT", &t_res));
 
@@ -865,106 +889,106 @@ test_util_config_line(void *arg)
           , sizeof(buf));
   str = buf;
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k");
   tt_str_op(v,OP_EQ, "v");
   tor_free(k); tor_free(v);
   tt_assert(!strcmpstart(str, "key    value with"));
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "key");
   tt_str_op(v,OP_EQ, "value with spaces");
   tor_free(k); tor_free(v);
   tt_assert(!strcmpstart(str, "keykey"));
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "keykey");
   tt_str_op(v,OP_EQ, "val");
   tor_free(k); tor_free(v);
   tt_assert(!strcmpstart(str, "k2\n"));
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k2");
   tt_str_op(v,OP_EQ, "");
   tor_free(k); tor_free(v);
   tt_assert(!strcmpstart(str, "k3 \n"));
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k3");
   tt_str_op(v,OP_EQ, "");
   tor_free(k); tor_free(v);
   tt_assert(!strcmpstart(str, "#comment"));
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k4");
   tt_str_op(v,OP_EQ, "");
   tor_free(k); tor_free(v);
   tt_assert(!strcmpstart(str, "k5#abc"));
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k5");
   tt_str_op(v,OP_EQ, "");
   tor_free(k); tor_free(v);
   tt_assert(!strcmpstart(str, "k6"));
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k6");
   tt_str_op(v,OP_EQ, "val");
   tor_free(k); tor_free(v);
   tt_assert(!strcmpstart(str, "kseven"));
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "kseven");
   tt_str_op(v,OP_EQ, "a quoted \'string");
   tor_free(k); tor_free(v);
   tt_assert(!strcmpstart(str, "k8 "));
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k8");
   tt_str_op(v,OP_EQ, "a quoted\n\"str\\ing\t\x01\x01\x01\"");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k9");
   tt_str_op(v,OP_EQ, "a line that spans two lines.");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k10");
   tt_str_op(v,OP_EQ, "more than one continuation");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k11");
   tt_str_op(v,OP_EQ, "continuation at the start");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k12");
   tt_str_op(v,OP_EQ, "line with a embedded");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k13");
   tt_str_op(v,OP_EQ, "continuation at the very start");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k14");
   tt_str_op(v,OP_EQ, "a line that has a comment and" );
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k15");
   tt_str_op(v,OP_EQ, "this should be the next new line");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k16");
   tt_str_op(v,OP_EQ, "a line that has a comment and" );
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k17");
   tt_str_op(v,OP_EQ, "this should be the next new line");
   tor_free(k); tor_free(v);
@@ -999,32 +1023,36 @@ test_util_config_line_quotes(void *arg)
           , sizeof(buf4));
   str = buf1;
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "kTrailingSpace");
   tt_str_op(v,OP_EQ, "quoted value");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_ptr_op(str,OP_EQ, NULL);
   tor_free(k); tor_free(v);
 
   str = buf2;
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_ptr_op(str,OP_EQ, NULL);
   tor_free(k); tor_free(v);
 
   str = buf3;
 
-  str = parse_config_line_from_str(str, &k, &v);
+  const char *err = NULL;
+  str = parse_config_line_from_str_verbose(str, &k, &v, &err);
   tt_ptr_op(str,OP_EQ, NULL);
   tor_free(k); tor_free(v);
+  tt_str_op(err, OP_EQ, "Invalid escape sequence in quoted string");
 
   str = buf4;
 
-  str = parse_config_line_from_str(str, &k, &v);
+  err = NULL;
+  str = parse_config_line_from_str_verbose(str, &k, &v, &err);
   tt_ptr_op(str,OP_EQ, NULL);
   tor_free(k); tor_free(v);
+  tt_str_op(err, OP_EQ, "Invalid escape sequence in quoted string");
 
  done:
   tor_free(k);
@@ -1046,12 +1074,12 @@ test_util_config_line_comment_character(void *arg)
           , sizeof(buf));
   str = buf;
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k1");
   tt_str_op(v,OP_EQ, "# in quotes");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "k2");
   tt_str_op(v,OP_EQ, "some value");
   tor_free(k); tor_free(v);
@@ -1059,7 +1087,7 @@ test_util_config_line_comment_character(void *arg)
   tt_str_op(str,OP_EQ, "k3 /home/user/myTorNetwork#2\n");
 
 #if 0
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   test_streq(k, "k3");
   test_streq(v, "/home/user/myTorNetwork#2");
   tor_free(k); tor_free(v);
@@ -1116,57 +1144,57 @@ test_util_config_line_escaped_content(void *arg)
 
   str = buf1;
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "HexadecimalLower");
   tt_str_op(v,OP_EQ, "*");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "HexadecimalUpper");
   tt_str_op(v,OP_EQ, "*");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "HexadecimalUpperX");
   tt_str_op(v,OP_EQ, "*");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "Octal");
   tt_str_op(v,OP_EQ, "*");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "Newline");
   tt_str_op(v,OP_EQ, "\n");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "Tab");
   tt_str_op(v,OP_EQ, "\t");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "CarriageReturn");
   tt_str_op(v,OP_EQ, "\r");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "DoubleQuote");
   tt_str_op(v,OP_EQ, "\"");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "SimpleQuote");
   tt_str_op(v,OP_EQ, "'");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "Backslash");
   tt_str_op(v,OP_EQ, "\\");
   tor_free(k); tor_free(v);
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_str_op(k,OP_EQ, "Mix");
   tt_str_op(v,OP_EQ, "This is a \"star\":\t'*'\nAnd second line");
   tor_free(k); tor_free(v);
@@ -1174,35 +1202,80 @@ test_util_config_line_escaped_content(void *arg)
 
   str = buf2;
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_ptr_op(str,OP_EQ, NULL);
   tor_free(k); tor_free(v);
 
   str = buf3;
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_ptr_op(str,OP_EQ, NULL);
   tor_free(k); tor_free(v);
 
   str = buf4;
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_ptr_op(str,OP_EQ, NULL);
   tor_free(k); tor_free(v);
 
 #if 0
   str = buf5;
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_ptr_op(str, OP_EQ, NULL);
   tor_free(k); tor_free(v);
 #endif
 
   str = buf6;
 
-  str = parse_config_line_from_str(str, &k, &v);
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
   tt_ptr_op(str,OP_EQ, NULL);
   tor_free(k); tor_free(v);
+
+  /* more things to try. */
+  /* Bad hex: */
+  strlcpy(buf1, "Foo \"\\x9g\"\n", sizeof(buf1));
+  strlcpy(buf2, "Foo \"\\xg0\"\n", sizeof(buf2));
+  strlcpy(buf3, "Foo \"\\xf\"\n", sizeof(buf3));
+  /* bad escape */
+  strlcpy(buf4, "Foo \"\\q\"\n", sizeof(buf4));
+  /* missing endquote */
+  strlcpy(buf5, "Foo \"hello\n", sizeof(buf5));
+  /* extra stuff */
+  strlcpy(buf6, "Foo \"hello\" world\n", sizeof(buf6));
+
+  str=buf1;
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
+  tt_ptr_op(str,OP_EQ, NULL);
+  tor_free(k); tor_free(v);
+
+  str=buf2;
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
+  tt_ptr_op(str,OP_EQ, NULL);
+  tor_free(k); tor_free(v);
+
+  str=buf3;
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
+  tt_ptr_op(str,OP_EQ, NULL);
+  tor_free(k); tor_free(v);
+
+  str=buf4;
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
+  tt_ptr_op(str,OP_EQ, NULL);
+  tor_free(k); tor_free(v);
+
+  str=buf5;
+
+  str = parse_config_line_from_str_verbose(str, &k, &v, NULL);
+  tt_ptr_op(str,OP_EQ, NULL);
+  tor_free(k); tor_free(v);
+
+  str=buf6;
+  const char *err = NULL;
+  str = parse_config_line_from_str_verbose(str, &k, &v, &err);
+  tt_ptr_op(str,OP_EQ, NULL);
+  tor_free(k); tor_free(v);
+  tt_str_op(err,OP_EQ, "Excess data after quoted string");
 
  done:
   tor_free(k);
@@ -1472,24 +1545,24 @@ test_util_strmisc(void *arg)
 
   {
   /* Test parse_double */
-  double d = tor_parse_double("10", 0, UINT64_MAX,&i,NULL);
+  double d = tor_parse_double("10", 0, (double)UINT64_MAX,&i,NULL);
   tt_int_op(1,OP_EQ, i);
   tt_assert(DBL_TO_U64(d) == 10);
-  d = tor_parse_double("0", 0, UINT64_MAX,&i,NULL);
+  d = tor_parse_double("0", 0, (double)UINT64_MAX,&i,NULL);
   tt_int_op(1,OP_EQ, i);
   tt_assert(DBL_TO_U64(d) == 0);
-  d = tor_parse_double(" ", 0, UINT64_MAX,&i,NULL);
+  d = tor_parse_double(" ", 0, (double)UINT64_MAX,&i,NULL);
   tt_int_op(0,OP_EQ, i);
-  d = tor_parse_double(".0a", 0, UINT64_MAX,&i,NULL);
+  d = tor_parse_double(".0a", 0, (double)UINT64_MAX,&i,NULL);
   tt_int_op(0,OP_EQ, i);
-  d = tor_parse_double(".0a", 0, UINT64_MAX,&i,&cp);
+  d = tor_parse_double(".0a", 0, (double)UINT64_MAX,&i,&cp);
   tt_int_op(1,OP_EQ, i);
-  d = tor_parse_double("-.0", 0, UINT64_MAX,&i,NULL);
+  d = tor_parse_double("-.0", 0, (double)UINT64_MAX,&i,NULL);
   tt_int_op(1,OP_EQ, i);
   tt_assert(DBL_TO_U64(d) == 0);
   d = tor_parse_double("-10", -100.0, 100.0,&i,NULL);
   tt_int_op(1,OP_EQ, i);
-  tt_int_op(-10.0,OP_EQ, d);
+  tt_double_op(fabs(d - -10.0),OP_LT, 1E-12);
   }
 
   {
@@ -1582,6 +1655,17 @@ test_util_strmisc(void *arg)
   /* Non-printable characters appear as octal */
   tt_str_op("\"z\\001abc\\277d\"",OP_EQ,  escaped("z\001abc\277d"));
   tt_str_op("\"z\\336\\255 ;foo\"",OP_EQ, escaped("z\xde\xad\x20;foo"));
+
+  /* Other cases of esc_for_log{,_len} */
+  cp_tmp = esc_for_log(NULL);
+  tt_str_op(cp_tmp, OP_EQ, "(null)");
+  tor_free(cp_tmp);
+  cp_tmp = esc_for_log_len("abcdefg", 3);
+  tt_str_op(cp_tmp, OP_EQ, "\"abc\"");
+  tor_free(cp_tmp);
+  cp_tmp = esc_for_log_len("abcdefg", 100);
+  tt_str_op(cp_tmp, OP_EQ, "\"abcdefg\"");
+  tor_free(cp_tmp);
 
   /* Test strndup and memdup */
   {
@@ -2842,18 +2926,39 @@ test_util_memarea(void *arg)
   p1 = memarea_alloc(area, 1);
   tt_ptr_op(p1,OP_EQ, p1_orig);
   memarea_clear(area);
+  size_t total = 0, initial_allocation, allocation2, dummy;
+  memarea_get_stats(area, &initial_allocation, &dummy);
 
   /* Check for running over an area's size. */
-  for (i = 0; i < 512; ++i) {
-    p1 = memarea_alloc(area, crypto_rand_int(5)+1);
+  for (i = 0; i < 4096; ++i) {
+    size_t n = crypto_rand_int(6);
+    p1 = memarea_alloc(area, n);
+    total += n;
     tt_assert(memarea_owns_ptr(area, p1));
   }
   memarea_assert_ok(area);
+  memarea_get_stats(area, &allocation2, &dummy);
   /* Make sure we can allocate a too-big object. */
   p1 = memarea_alloc_zero(area, 9000);
   p2 = memarea_alloc_zero(area, 16);
+  total += 9000;
+  total += 16;
   tt_assert(memarea_owns_ptr(area, p1));
   tt_assert(memarea_owns_ptr(area, p2));
+
+  /* Now test stats... */
+  size_t allocated = 0, used = 0;
+  memarea_get_stats(area, &allocated, &used);
+  tt_int_op(used, OP_LE, allocated);
+  tt_int_op(used, OP_GE, total); /* not EQ, because of alignment and headers*/
+  tt_int_op(allocated, OP_GT, allocation2);
+
+  tt_int_op(allocation2, OP_GT, initial_allocation);
+
+  memarea_clear(area);
+  memarea_get_stats(area, &allocated, &used);
+  tt_int_op(used, OP_LT, 128); /* Not 0, because of header */
+  tt_int_op(allocated, OP_EQ, initial_allocation);
 
  done:
   memarea_drop_all(area);
@@ -4392,7 +4497,7 @@ test_util_clamp_double_to_int64(void *arg)
 {
   (void)arg;
 
-  tt_i64_op(INT64_MIN, ==, clamp_double_to_int64(-INFINITY));
+  tt_i64_op(INT64_MIN, ==, clamp_double_to_int64(-INFINITY_DBL));
   tt_i64_op(INT64_MIN, ==,
             clamp_double_to_int64(-1.0 * pow(2.0, 64.0) - 1.0));
   tt_i64_op(INT64_MIN, ==,
@@ -4405,7 +4510,7 @@ test_util_clamp_double_to_int64(void *arg)
   tt_i64_op(0, ==, clamp_double_to_int64(-0.9));
   tt_i64_op(0, ==, clamp_double_to_int64(-0.1));
   tt_i64_op(0, ==, clamp_double_to_int64(0.0));
-  tt_i64_op(0, ==, clamp_double_to_int64(NAN));
+  tt_i64_op(0, ==, clamp_double_to_int64(NAN_DBL));
   tt_i64_op(0, ==, clamp_double_to_int64(0.1));
   tt_i64_op(0, ==, clamp_double_to_int64(0.9));
   tt_i64_op(1, ==, clamp_double_to_int64(1.0));
@@ -4417,7 +4522,7 @@ test_util_clamp_double_to_int64(void *arg)
             clamp_double_to_int64(pow(2.0, 63.0)));
   tt_i64_op(INT64_MAX, ==,
             clamp_double_to_int64(pow(2.0, 64.0)));
-  tt_i64_op(INT64_MAX, ==, clamp_double_to_int64(INFINITY));
+  tt_i64_op(INT64_MAX, ==, clamp_double_to_int64(INFINITY_DBL));
 
  done:
   ;
@@ -4771,6 +4876,36 @@ test_util_pwdb(void *arg)
 }
 #endif
 
+static void
+test_util_calloc_check(void *arg)
+{
+  (void) arg;
+  /* Easy cases that are good. */
+  tt_assert(size_mul_check__(0,0));
+  tt_assert(size_mul_check__(0,100));
+  tt_assert(size_mul_check__(100,0));
+  tt_assert(size_mul_check__(100,100));
+
+  /* Harder cases that are still good. */
+  tt_assert(size_mul_check__(SIZE_MAX, 1));
+  tt_assert(size_mul_check__(1, SIZE_MAX));
+  tt_assert(size_mul_check__(SIZE_MAX / 10, 9));
+  tt_assert(size_mul_check__(11, SIZE_MAX / 12));
+  const size_t sqrt_size_max_p1 = ((size_t)1) << (sizeof(size_t) * 4);
+  tt_assert(size_mul_check__(sqrt_size_max_p1, sqrt_size_max_p1 - 1));
+
+  /* Cases that overflow */
+  tt_assert(! size_mul_check__(SIZE_MAX, 2));
+  tt_assert(! size_mul_check__(2, SIZE_MAX));
+  tt_assert(! size_mul_check__(SIZE_MAX / 10, 11));
+  tt_assert(! size_mul_check__(11, SIZE_MAX / 10));
+  tt_assert(! size_mul_check__(SIZE_MAX / 8, 9));
+  tt_assert(! size_mul_check__(sqrt_size_max_p1, sqrt_size_max_p1));
+
+ done:
+  ;
+}
+
 #define UTIL_LEGACY(name)                                               \
   { #name, test_util_ ## name , 0, NULL, NULL }
 
@@ -4856,6 +4991,7 @@ struct testcase_t util_tests[] = {
   UTIL_TEST(get_avail_disk_space, 0),
   UTIL_TEST(touch_file, 0),
   UTIL_TEST_NO_WIN(pwdb, TT_FORK),
+  UTIL_TEST(calloc_check, 0),
   END_OF_TESTCASES
 };
 

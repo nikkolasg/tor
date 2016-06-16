@@ -125,7 +125,7 @@ tor_event_free(struct event *ev)
 #endif
 
 /** Global event base for use by the main thread. */
-struct event_base *the_event_base = NULL;
+static struct event_base *the_event_base = NULL;
 
 /* This is what passes for version detection on OSX.  We set
  * MACOSX_KQUEUE_IS_BROKEN to true iff we're on a version of OSX before
@@ -228,8 +228,10 @@ tor_libevent_initialize(tor_libevent_cfg *torcfg)
 #endif
 
   if (!the_event_base) {
+    /* LCOV_EXCL_START */
     log_err(LD_GENERAL, "Unable to initialize Libevent: cannot continue.");
     exit(1);
+    /* LCOV_EXCL_STOP */
   }
 
   /* Making this a NOTICE for now so we can link bugs to a libevent versions

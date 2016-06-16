@@ -371,8 +371,6 @@ char *read_file_to_str_until_eof(int fd, size_t max_bytes_to_read,
 const char *parse_config_line_from_str_verbose(const char *line,
                                        char **key_out, char **value_out,
                                        const char **err_out);
-#define parse_config_line_from_str(line,key_out,value_out) \
-  parse_config_line_from_str_verbose((line),(key_out),(value_out),NULL)
 char *expand_filename(const char *filename);
 struct smartlist_t *tor_listdir(const char *dirname);
 int path_is_relative(const char *filename);
@@ -533,6 +531,10 @@ STATIC int format_helper_exit_status(unsigned char child_state,
                         1 + sizeof(int) * 2 + 1)
 #endif
 
+#endif
+
+#ifdef TOR_UNIT_TESTS
+int size_mul_check__(const size_t x, const size_t y);
 #endif
 
 #define ARRAY_LENGTH(x) ((sizeof(x)) / sizeof(x[0]))

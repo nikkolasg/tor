@@ -526,8 +526,10 @@ tor_asprintf(char **strp, const char *fmt, ...)
   r = tor_vasprintf(strp, fmt, args);
   va_end(args);
   if (!*strp || r < 0) {
+    /* LCOV_EXCL_START */
     log_err(LD_BUG, "Internal error in asprintf");
     tor_assert(0);
+    /* LCOV_EXCL_STOP */
   }
   return r;
 }
@@ -2874,18 +2876,22 @@ tor_gettimeofday(struct timeval *timeval)
   /* number of 100-nsec units since Jan 1, 1601 */
   GetSystemTimeAsFileTime(&ft.ft_ft);
   if (ft.ft_64 < EPOCH_BIAS) {
+    /* LCOV_EXCL_START */
     log_err(LD_GENERAL,"System time is before 1970; failing.");
     exit(1);
+    /* LCOV_EXCL_STOP */
   }
   ft.ft_64 -= EPOCH_BIAS;
   timeval->tv_sec = (unsigned) (ft.ft_64 / UNITS_PER_SEC);
   timeval->tv_usec = (unsigned) ((ft.ft_64 / UNITS_PER_USEC) % USEC_PER_SEC);
 #elif defined(HAVE_GETTIMEOFDAY)
   if (gettimeofday(timeval, NULL)) {
+    /* LCOV_EXCL_START */
     log_err(LD_GENERAL,"gettimeofday failed.");
     /* If gettimeofday dies, we have either given a bad timezone (we didn't),
        or segfaulted.*/
     exit(1);
+    /* LCOV_EXCL_STOP */
   }
 #elif defined(HAVE_FTIME)
   struct timeb tb;
@@ -2976,11 +2982,12 @@ correct_tm(int islocal, const time_t *timep, struct tm *resultbuf,
 
   /* If we get here, then gmtime/localtime failed without getting an extreme
    * value for *timep */
-
+  /* LCOV_EXCL_START */
   tor_fragile_assert();
   r = resultbuf;
   memset(resultbuf, 0, sizeof(struct tm));
   outcome="can't recover";
+  /* LCOV_EXCL_STOP */
  done:
   log_warn(LD_BUG, "%s("I64_FORMAT") failed with error %s: %s",
            islocal?"localtime":"gmtime",

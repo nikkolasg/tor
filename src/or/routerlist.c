@@ -159,6 +159,9 @@ download_status_cert_init(download_status_t *dlstatus)
   dlstatus->schedule = DL_SCHED_CONSENSUS;
   dlstatus->want_authority = DL_WANT_ANY_DIRSERVER;
   dlstatus->increment_on = DL_SCHED_INCREMENT_FAILURE;
+  dlstatus->backoff = DL_SCHED_RANDOM_EXPONENTIAL;
+  dlstatus->last_backoff_position = 0;
+  dlstatus->last_delay_used = 0;
 
   /* Use the new schedule to set next_attempt_at */
   download_status_reset(dlstatus);
@@ -248,6 +251,112 @@ get_cert_list(const char *id_digest)
     digestmap_set(trusted_dir_certs, id_digest, cl);
   }
   return cl;
+}
+
+/** Return a list of authority ID digests with potentially enumerable lists
+ * of download_status_t objects; used by controller GETINFO queries.
+ */
+
+MOCK_IMPL(smartlist_t *,
+list_authority_ids_with_downloads, (void))
+{
+  smartlist_t *ids = smartlist_new();
+  digestmap_iter_t *i;
+  const char *digest;
+  char *tmp;
+  void *cl;
+
+  if (trusted_dir_certs) {
+    for (i = digestmap_iter_init(trusted_dir_certs);
+         !(digestmap_iter_done(i));
+         i = digestmap_iter_next(trusted_dir_certs, i)) {
+      /*
+       * We always have at least dl_status_by_id to query, so no need to
+       * probe deeper than the existence of a cert_list_t.
+       */
+      digestmap_iter_get(i, &digest, &cl);
+      tmp = tor_malloc(DIGEST_LEN);
+      memcpy(tmp, digest, DIGEST_LEN);
+      smartlist_add(ids, tmp);
+    }
+  }
+  /* else definitely no downlaods going since nothing even has a cert list */
+
+  return ids;
+}
+
+/** Given an authority ID digest, return a pointer to the default download
+ * status, or NULL if there is no such entry in trusted_dir_certs */
+
+MOCK_IMPL(download_status_t *,
+id_only_download_status_for_authority_id, (const char *digest))
+{
+  download_status_t *dl = NULL;
+  cert_list_t *cl;
+
+  if (trusted_dir_certs) {
+    cl = digestmap_get(trusted_dir_certs, digest);
+    if (cl) {
+      dl = &(cl->dl_status_by_id);
+    }
+  }
+
+  return dl;
+}
+
+/** Given an authority ID digest, return a smartlist of signing key digests
+ * for which download_status_t is potentially queryable, or NULL if no such
+ * authority ID digest is known. */
+
+MOCK_IMPL(smartlist_t *,
+list_sk_digests_for_authority_id, (const char *digest))
+{
+  smartlist_t *sks = NULL;
+  cert_list_t *cl;
+  dsmap_iter_t *i;
+  const char *sk_digest;
+  char *tmp;
+  download_status_t *dl;
+
+  if (trusted_dir_certs) {
+    cl = digestmap_get(trusted_dir_certs, digest);
+    if (cl) {
+      sks = smartlist_new();
+      if (cl->dl_status_map) {
+        for (i = dsmap_iter_init(cl->dl_status_map);
+             !(dsmap_iter_done(i));
+             i = dsmap_iter_next(cl->dl_status_map, i)) {
+          /* Pull the digest out and add it to the list */
+          dsmap_iter_get(i, &sk_digest, &dl);
+          tmp = tor_malloc(DIGEST_LEN);
+          memcpy(tmp, sk_digest, DIGEST_LEN);
+          smartlist_add(sks, tmp);
+        }
+      }
+    }
+  }
+
+  return sks;
+}
+
+/** Given an authority ID digest and a signing key digest, return the
+ * download_status_t or NULL if none exists. */
+
+MOCK_IMPL(download_status_t *,
+  download_status_for_authority_id_and_sk,
+  (const char *id_digest, const char *sk_digest))
+{
+  download_status_t *dl = NULL;
+  cert_list_t *cl = NULL;
+
+  if (trusted_dir_certs) {
+    cl = digestmap_get(trusted_dir_certs, id_digest);
+    if (cl && cl->dl_status_map) {
+      dl = dsmap_get(cl->dl_status_map, sk_digest);
+    }
+  }
+
+  return dl;
 }
 
 /** Release all space held by a cert_list_t */
@@ -725,6 +834,68 @@ authority_cert_dl_looks_uncertain(const char *id_digest)
   return n_failures >= N_AUTH_CERT_DL_FAILURES_TO_BUG_USER;
 }
 
+/* Fetch the authority certificates specified in resource.
+ * If we are a bridge client, and node is a configured bridge, fetch from node
+ * using dir_hint as the fingerprint. Otherwise, if rs is not NULL, fetch from
+ * rs. Otherwise, fetch from a random directory mirror. */
+static void
+authority_certs_fetch_resource_impl(const char *resource,
+                                    const char *dir_hint,
+                                    const node_t *node,
+                                    const routerstatus_t *rs)
+{
+  const or_options_t *options = get_options();
+  int get_via_tor = purpose_needs_anonymity(DIR_PURPOSE_FETCH_CERTIFICATE, 0);
+
+  /* Make sure bridge clients never connect to anything but a bridge */
+  if (options->UseBridges) {
+    if (node && !node_is_a_configured_bridge(node)) {
+      /* If we're using bridges, and node is not a bridge, use a 3-hop path. */
+      get_via_tor = 1;
+    } else if (!node) {
+      /* If we're using bridges, and there's no node, use a 3-hop path. */
+      get_via_tor = 1;
+    }
+  }
+
+  const dir_indirection_t indirection = get_via_tor ? DIRIND_ANONYMOUS
+                                                    : DIRIND_ONEHOP;
+
+  /* If we've just downloaded a consensus from a bridge, re-use that
+   * bridge */
+  if (options->UseBridges && node && !get_via_tor) {
+    /* clients always make OR connections to bridges */
+    tor_addr_port_t or_ap;
+    /* we are willing to use a non-preferred address if we need to */
+    fascist_firewall_choose_address_node(node, FIREWALL_OR_CONNECTION, 0,
+                                         &or_ap);
+    directory_initiate_command(&or_ap.addr, or_ap.port,
+                               NULL, 0, /*no dirport*/
+                               dir_hint,
+                               DIR_PURPOSE_FETCH_CERTIFICATE,
+                               0,
+                               indirection,
+                               resource, NULL, 0, 0);
+    return;
+  }
+
+  if (rs) {
+    /* If we've just downloaded a consensus from a directory, re-use that
+     * directory */
+    directory_initiate_command_routerstatus(rs,
+                                            DIR_PURPOSE_FETCH_CERTIFICATE,
+                                            0, indirection, resource, NULL,
+                                            0, 0);
+    return;
+  }
+
+  /* Otherwise, we want certs from a random fallback or directory
+   * mirror, because they will almost always succeed. */
+  directory_get_from_dirserver(DIR_PURPOSE_FETCH_CERTIFICATE, 0,
+                               resource, PDS_RETRY_IF_NO_SERVERS,
+                               DL_WANT_ANY_DIRSERVER);
+}
+
 /** Try to download any v3 authority certificates that we may be missing.  If
  * <b>status</b> is provided, try to get all the ones that were used to sign
  * <b>status</b>.  Additionally, try to have a non-expired certificate for
@@ -756,12 +927,13 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now,
   smartlist_t *missing_cert_digests, *missing_id_digests;
   char *resource = NULL;
   cert_list_t *cl;
-  const int cache = directory_caches_unknown_auth_certs(get_options());
+  const or_options_t *options = get_options();
+  const int cache = directory_caches_unknown_auth_certs(options);
   fp_pair_t *fp_tmp = NULL;
   char id_digest_str[2*DIGEST_LEN+1];
   char sk_digest_str[2*DIGEST_LEN+1];
 
-  if (should_delay_dir_fetches(get_options(), NULL))
+  if (should_delay_dir_fetches(options, NULL))
     return;
 
   pending_cert = fp_pair_map_new();
@@ -802,7 +974,7 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now,
     } SMARTLIST_FOREACH_END(cert);
     if (!found &&
         download_status_is_ready(&(cl->dl_status_by_id), now,
-                                 get_options()->TestingCertMaxDownloadTries) &&
+                                 options->TestingCertMaxDownloadTries) &&
         !digestmap_get(pending_id, ds->v3_identity_digest)) {
       log_info(LD_DIR,
                "No current certificate known for authority %s "
@@ -864,7 +1036,7 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now,
         }
         if (download_status_is_ready_by_sk_in_cl(
               cl, sig->signing_key_digest,
-              now, get_options()->TestingCertMaxDownloadTries) &&
+              now, options->TestingCertMaxDownloadTries) &&
             !fp_pair_map_get_by_digests(pending_cert,
                                         voter->identity_digest,
                                         sig->signing_key_digest)) {
@@ -901,7 +1073,10 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now,
     } SMARTLIST_FOREACH_END(voter);
   }
 
-  /* Look up the routerstatus for the dir_hint  */
+  /* Bridge clients look up the node for the dir_hint  */
+  const node_t *node = NULL;
+  /* All clients, including bridge clients, look up the routerstatus for the
+   * dir_hint */
   const routerstatus_t *rs = NULL;
 
   /* If we still need certificates, try the directory that just successfully
@@ -909,12 +1084,16 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now,
    * As soon as the directory fails to provide additional certificates, we try
    * another, randomly selected directory. This avoids continual retries.
    * (We only ever have one outstanding request per certificate.)
-   *
-   * Bridge clients won't find their bridges using this hint, so they will
-   * fall back to using directory_get_from_dirserver, which selects a bridge.
    */
   if (dir_hint) {
-    /* First try the consensus routerstatus, then the fallback
+    if (options->UseBridges) {
+      /* Bridge clients try the nodelist. If the dir_hint is from an authority,
+       * or something else fetched over tor, we won't find the node here, but
+       * we will find the rs. */
+      node = node_get_by_id(dir_hint);
+    }
+
+    /* All clients try the consensus routerstatus, then the fallback
      * routerstatus */
     rs = router_get_consensus_status_by_id(dir_hint);
     if (!rs) {
@@ -926,9 +1105,11 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now,
       }
     }
 
-    if (!rs) {
-      log_warn(LD_BUG, "Directory %s delivered a consensus, but a "
-               "routerstatus could not be found for it.", dir_hint);
+    if (!node && !rs) {
+      log_warn(LD_BUG, "Directory %s delivered a consensus, but %s"
+               "no routerstatus could be found for it.",
+               options->UseBridges ? "no node and " : "",
+               hex_str(dir_hint, DIGEST_LEN));
     }
   }
 
@@ -961,25 +1142,9 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now,
 
     if (smartlist_len(fps) > 1) {
       resource = smartlist_join_strings(fps, "", 0, NULL);
-
-      /* If we've just downloaded a consensus from a directory, re-use that
-       * directory */
-      if (rs) {
-        /* Certificate fetches are one-hop, unless AllDirActionsPrivate is 1 */
-        int get_via_tor = get_options()->AllDirActionsPrivate;
-        const dir_indirection_t indirection = get_via_tor ? DIRIND_ANONYMOUS
-                                                          : DIRIND_ONEHOP;
-        directory_initiate_command_routerstatus(rs,
-                                                DIR_PURPOSE_FETCH_CERTIFICATE,
-                                                0, indirection, resource, NULL,
-                                                0, 0);
-      } else {
-        /* Otherwise, we want certs from a random fallback or directory
-         * mirror, because they will almost always succeed. */
-        directory_get_from_dirserver(DIR_PURPOSE_FETCH_CERTIFICATE, 0,
-                                     resource, PDS_RETRY_IF_NO_SERVERS,
-                                     DL_WANT_ANY_DIRSERVER);
-      }
+      /* node and rs are directories that just gave us a consensus or
+       * certificates */
+      authority_certs_fetch_resource_impl(resource, dir_hint, node, rs);
       tor_free(resource);
     }
     /* else we didn't add any: they were all pending */
@@ -1022,25 +1187,9 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now,
 
     if (smartlist_len(fp_pairs) > 1) {
       resource = smartlist_join_strings(fp_pairs, "", 0, NULL);
-
-      /* If we've just downloaded a consensus from a directory, re-use that
-       * directory */
-      if (rs) {
-        /* Certificate fetches are one-hop, unless AllDirActionsPrivate is 1 */
-        int get_via_tor = get_options()->AllDirActionsPrivate;
-        const dir_indirection_t indirection = get_via_tor ? DIRIND_ANONYMOUS
-                                                          : DIRIND_ONEHOP;
-        directory_initiate_command_routerstatus(rs,
-                                                DIR_PURPOSE_FETCH_CERTIFICATE,
-                                                0, indirection, resource, NULL,
-                                                0, 0);
-      } else {
-        /* Otherwise, we want certs from a random fallback or directory
-         * mirror, because they will almost always succeed. */
-        directory_get_from_dirserver(DIR_PURPOSE_FETCH_CERTIFICATE, 0,
-                                     resource, PDS_RETRY_IF_NO_SERVERS,
-                                     DL_WANT_ANY_DIRSERVER);
-      }
+      /* node and rs are directories that just gave us a consensus or
+       * certificates */
+      authority_certs_fetch_resource_impl(resource, dir_hint, node, rs);
       tor_free(resource);
     }
     /* else they were all pending */
@@ -1460,6 +1609,7 @@ router_get_trusteddirserver_by_digest(const char *digest)
  * key hashes to <b>digest</b>, or NULL if no such fallback is in the list of
  * fallback_dir_servers. (fallback_dir_servers is affected by the FallbackDir
  * and UseDefaultFallbackDirs torrc options.)
+ * The list of fallback directories includes the list of authorities.
  */
 dir_server_t *
 router_get_fallback_dirserver_by_digest(const char *digest)
@@ -1483,6 +1633,7 @@ router_get_fallback_dirserver_by_digest(const char *digest)
  * or 0 if no such fallback is in the list of fallback_dir_servers.
  * (fallback_dir_servers is affected by the FallbackDir and
  * UseDefaultFallbackDirs torrc options.)
+ * The list of fallback directories includes the list of authorities.
  */
 int
 router_digest_is_fallback_dir(const char *digest)
@@ -1494,8 +1645,8 @@ router_digest_is_fallback_dir(const char *digest)
  * v3 identity key hashes to <b>digest</b>, or NULL if no such authority
  * is known.
  */
-dir_server_t *
-trusteddirserver_get_by_v3_auth_digest(const char *digest)
+MOCK_IMPL(dir_server_t *,
+trusteddirserver_get_by_v3_auth_digest, (const char *digest))
 {
   if (!trusted_dir_servers)
     return NULL;
@@ -1653,20 +1804,18 @@ router_picked_poor_directory_log(const routerstatus_t *rs)
 #endif
 
   /* We couldn't find a node, or the one we have doesn't fit our preferences.
-   * This might be a bug. */
+   * Sometimes this is normal, sometimes it can be a reachability issue. */
   if (!rs) {
-    static int logged_backtrace = 0;
-    log_info(LD_BUG, "Wanted to make an outgoing directory connection, but "
-             "all OR and Dir addresses for all relays were not reachable. "
-             "Check ReachableAddresses, ClientUseIPv4, and similar options.");
-    if (!logged_backtrace) {
-      log_backtrace(LOG_INFO, LD_BUG, "Node search initiated by");
-      logged_backtrace = 1;
-    }
+    /* This happens a lot, so it's at debug level */
+    log_debug(LD_DIR, "Wanted to make an outgoing directory connection, but "
+              "we couldn't find a directory that fit our criteria. "
+              "Perhaps we will succeed next time with less strict criteria.");
   } else if (!fascist_firewall_allows_rs(rs, FIREWALL_OR_CONNECTION, 1)
              && !fascist_firewall_allows_rs(rs, FIREWALL_DIR_CONNECTION, 1)
              ) {
-    log_info(LD_BUG, "Selected a directory %s with non-preferred OR and Dir "
+    /* This is rare, and might be interesting to users trying to diagnose
+     * connection issues on dual-stack machines. */
+    log_info(LD_DIR, "Selected a directory %s with non-preferred OR and Dir "
              "addresses for launching an outgoing connection: "
              "IPv4 %s OR %d Dir %d IPv6 %s OR %d Dir %d",
              routerstatus_describe(rs),
@@ -2685,7 +2834,8 @@ hex_digest_nickname_decode(const char *hexdigest,
     return -1;
   }
 
-  if (base16_decode(digest_out, DIGEST_LEN, hexdigest, HEX_DIGEST_LEN)<0)
+  if (base16_decode(digest_out, DIGEST_LEN,
+                    hexdigest, HEX_DIGEST_LEN) != DIGEST_LEN)
     return -1;
   return 0;
 }
@@ -2770,7 +2920,7 @@ hexdigest_to_digest(const char *hexdigest, char *digest)
   if (hexdigest[0]=='$')
     ++hexdigest;
   if (strlen(hexdigest) < HEX_DIGEST_LEN ||
-      base16_decode(digest,DIGEST_LEN,hexdigest,HEX_DIGEST_LEN) < 0)
+      base16_decode(digest,DIGEST_LEN,hexdigest,HEX_DIGEST_LEN) != DIGEST_LEN)
     return -1;
   return 0;
 }

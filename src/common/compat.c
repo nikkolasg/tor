@@ -12,18 +12,6 @@
  * the platform.
  **/
 
-/* This is required on rh7 to make strptime not complain.
- * We also need it to make memmem get defined (where available)
- */
-
-/* XXXX We should just  use AC_USE_SYSTEM_EXTENSIONS in our autoconf,
- * and get this (and other important stuff!) automatically. Once we do that,
- * make sure to also change the extern char **environ detection in
- * configure.ac, because whether that is declared or not depends on whether
- * we have _GNU_SOURCE defined! Maybe that means that once we take this out,
- * we can also take out the configure check. */
-#define _GNU_SOURCE
-
 #define COMPAT_PRIVATE
 #include "compat.h"
 
@@ -1157,14 +1145,12 @@ tor_close_socket(tor_socket_t s)
       --n_sockets_open;
 #else
     if (r != EBADF)
-      --n_sockets_open;
+      --n_sockets_open; // LCOV_EXCL_LINE -- EIO and EINTR too hard to force.
 #endif
     r = -1;
   }
 
-  if (n_sockets_open < 0)
-    log_warn(LD_BUG, "Our socket count is below zero: %d. Please submit a "
-             "bug report.", n_sockets_open);
+  tor_assert_nonfatal(n_sockets_open >= 0);
   socket_accounting_unlock();
   return r;
 }
@@ -1944,7 +1930,7 @@ tor_getpwnam(const char *username)
     return NULL;
 
   if (! strcmp(username, passwd_cached->pw_name))
-    return passwd_cached;
+    return passwd_cached; // LCOV_EXCL_LINE - would need to make getpwnam flaky
 
   return NULL;
 }
@@ -1970,7 +1956,7 @@ tor_getpwuid(uid_t uid)
     return NULL;
 
   if (uid == passwd_cached->pw_uid)
-    return passwd_cached;
+    return passwd_cached; // LCOV_EXCL_LINE - would need to make getpwnam flaky
 
   return NULL;
 }
@@ -2353,28 +2339,15 @@ get_parent_directory(char *fname)
 static char *
 alloc_getcwd(void)
 {
-    int saved_errno = errno;
-/* We use this as a starting path length. Not too large seems sane. */
-#define START_PATH_LENGTH 128
-/* Nobody has a maxpath longer than this, as far as I know.  And if they
- * do, they shouldn't. */
-#define MAX_SANE_PATH_LENGTH 4096
-    size_t path_length = START_PATH_LENGTH;
-    char *path = tor_malloc(path_length);
+#ifdef PATH_MAX
+#define MAX_CWD PATH_MAX
+#else
+#define MAX_CWD 4096
+#endif
 
-    errno = 0;
-    while (getcwd(path, path_length) == NULL) {
-      if (errno == ERANGE && path_length < MAX_SANE_PATH_LENGTH) {
-        path_length*=2;
-        path = tor_realloc(path, path_length);
-      } else {
-        tor_free(path);
-        path = NULL;
-        break;
-      }
-    }
-    errno = saved_errno;
-    return path;
+  char path_buf[MAX_CWD];
+  char *path = getcwd(path_buf, sizeof(path_buf));
+  return path ? tor_strdup(path) : NULL;
 }
 #endif
 
@@ -2405,11 +2378,13 @@ make_path_absolute(char *fname)
       tor_asprintf(&absfname, "%s/%s", path, fname);
       tor_free(path);
     } else {
+      /* LCOV_EXCL_START Can't make getcwd fail. */
       /* If getcwd failed, the best we can do here is keep using the
        * relative path.  (Perhaps / isn't readable by this UID/GID.) */
       log_warn(LD_GENERAL, "Unable to find current working directory: %s",
                strerror(errno));
       absfname = tor_strdup(fname);
+      /* LCOV_EXCL_STOP */
     }
   }
   return absfname;
@@ -2773,7 +2748,9 @@ MOCK_IMPL(const char *, get_uname, (void))
       }
 #endif
 #else
+        /* LCOV_EXCL_START -- can't provoke uname failure */
         strlcpy(uname_result, "Unknown platform", sizeof(uname_result));
+        /* LCOV_EXCL_STOP */
 #endif
       }
     uname_result_is_set = 1;
@@ -2847,11 +2824,14 @@ compute_num_cpus(void)
   if (num_cpus == -2) {
     num_cpus = compute_num_cpus_impl();
     tor_assert(num_cpus != -2);
-    if (num_cpus > MAX_DETECTABLE_CPUS)
+    if (num_cpus > MAX_DETECTABLE_CPUS) {
+      /* LCOV_EXCL_START */
       log_notice(LD_GENERAL, "Wow!  I detected that you have %d CPUs. I "
                  "will not autodetect any more than %d, though.  If you "
                  "want to configure more, set NumCPUs in your torrc",
                  num_cpus, MAX_DETECTABLE_CPUS);
+      /* LCOV_EXCL_STOP */
+    }
   }
   return num_cpus;
 }
@@ -3381,9 +3361,11 @@ get_total_system_memory_impl(void)
   return result * 1024;
 
  err:
+  /* LCOV_EXCL_START Can't reach this unless proc is broken. */
   tor_free(s);
   close(fd);
   return 0;
+  /* LCOV_EXCL_STOP */
 #elif defined (_WIN32)
   /* Windows has MEMORYSTATUSEX; pretty straightforward. */
   MEMORYSTATUSEX ms;
@@ -3432,6 +3414,7 @@ get_total_system_memory(size_t *mem_out)
   static size_t mem_cached=0;
   uint64_t m = get_total_system_memory_impl();
   if (0 == m) {
+    /* LCOV_EXCL_START -- can't make this happen without mocking. */
     /* We couldn't find our memory total */
     if (0 == mem_cached) {
       /* We have no cached value either */
@@ -3441,6 +3424,7 @@ get_total_system_memory(size_t *mem_out)
 
     *mem_out = mem_cached;
     return 0;
+    /* LCOV_EXCL_STOP */
   }
 
 #if SIZE_MAX != UINT64_MAX

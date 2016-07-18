@@ -32,7 +32,9 @@
 #include "router.h"
 #include "routerlist.h"
 #include "routerparse.h"
+#include "shared_random.h"
 #include "transports.h"
+#include "torcert.h"
 
 /** Map from lowercase nickname to identity digest of named server, if any. */
 static strmap_t *named_server_map = NULL;
@@ -86,9 +88,9 @@ static time_t time_to_download_next_consensus[N_CONSENSUS_FLAVORS];
 static download_status_t consensus_dl_status[N_CONSENSUS_FLAVORS] =
   {
     { 0, 0, 0, DL_SCHED_CONSENSUS, DL_WANT_ANY_DIRSERVER,
-                                   DL_SCHED_INCREMENT_FAILURE },
+      DL_SCHED_INCREMENT_FAILURE, DL_SCHED_RANDOM_EXPONENTIAL, 0, 0 },
     { 0, 0, 0, DL_SCHED_CONSENSUS, DL_WANT_ANY_DIRSERVER,
-                                   DL_SCHED_INCREMENT_FAILURE },
+      DL_SCHED_INCREMENT_FAILURE, DL_SCHED_RANDOM_EXPONENTIAL, 0, 0 },
   };
 
 #define N_CONSENSUS_BOOTSTRAP_SCHEDULES 2
@@ -105,10 +107,10 @@ static download_status_t
               consensus_bootstrap_dl_status[N_CONSENSUS_BOOTSTRAP_SCHEDULES] =
   {
     { 0, 0, 0, DL_SCHED_CONSENSUS, DL_WANT_AUTHORITY,
-                                   DL_SCHED_INCREMENT_ATTEMPT },
+      DL_SCHED_INCREMENT_ATTEMPT, DL_SCHED_RANDOM_EXPONENTIAL, 0, 0 },
     /* During bootstrap, DL_WANT_ANY_DIRSERVER means "use fallbacks". */
     { 0, 0, 0, DL_SCHED_CONSENSUS, DL_WANT_ANY_DIRSERVER,
-                                   DL_SCHED_INCREMENT_ATTEMPT },
+      DL_SCHED_INCREMENT_ATTEMPT, DL_SCHED_RANDOM_EXPONENTIAL, 0, 0 },
   };
 
 /** True iff we have logged a warning about this OR's version being older than
@@ -319,6 +321,14 @@ networkstatus_vote_free(networkstatus_t *ns)
   }
 
   digestmap_free(ns->desc_digest_map, NULL);
+
+  if (ns->sr_info.commits) {
+    SMARTLIST_FOREACH(ns->sr_info.commits, sr_commit_t *, c,
+                      sr_commit_free(c));
+    smartlist_free(ns->sr_info.commits);
+  }
+  tor_free(ns->sr_info.previous_srv);
+  tor_free(ns->sr_info.current_srv);
 
   memwipe(ns, 11, sizeof(*ns));
   tor_free(ns);
@@ -657,6 +667,43 @@ router_get_consensus_status_by_descriptor_digest(networkstatus_t *consensus,
 {
   return router_get_mutable_consensus_status_by_descriptor_digest(
                                                           consensus, digest);
+}
+
+/** Return a smartlist of all router descriptor digests in a consensus */
+static smartlist_t *
+router_get_descriptor_digests_in_consensus(networkstatus_t *consensus)
+{
+  smartlist_t *result = smartlist_new();
+  digestmap_iter_t *i;
+  const char *digest;
+  void *rs;
+  char *digest_tmp;
+
+  for (i = digestmap_iter_init(consensus->desc_digest_map);
+       !(digestmap_iter_done(i));
+       i = digestmap_iter_next(consensus->desc_digest_map, i)) {
+    digestmap_iter_get(i, &digest, &rs);
+    digest_tmp = tor_malloc(DIGEST_LEN);
+    memcpy(digest_tmp, digest, DIGEST_LEN);
+    smartlist_add(result, digest_tmp);
+  }
+
+  return result;
+}
+
+/** Return a smartlist of all router descriptor digests in the current
+ * consensus */
+MOCK_IMPL(smartlist_t *,
+router_get_descriptor_digests,(void))
+{
+  smartlist_t *result = NULL;
+
+  if (current_ns_consensus) {
+    result =
+      router_get_descriptor_digests_in_consensus(current_ns_consensus);
+  }
+
+  return result;
 }
 
 /** Given the digest of a router descriptor, return its current download
@@ -1179,10 +1226,56 @@ consensus_is_waiting_for_certs(void)
     ? 1 : 0;
 }
 
+/** Look up the currently active (depending on bootstrap status) download
+ * status for this consensus flavor and return a pointer to it.
+ */
+MOCK_IMPL(download_status_t *,
+networkstatus_get_dl_status_by_flavor,(consensus_flavor_t flavor))
+{
+  download_status_t *dl = NULL;
+  const int we_are_bootstrapping =
+    networkstatus_consensus_is_bootstrapping(time(NULL));
+
+  if ((int)flavor <= N_CONSENSUS_FLAVORS) {
+    dl = &((we_are_bootstrapping ?
+           consensus_bootstrap_dl_status : consensus_dl_status)[flavor]);
+  }
+
+  return dl;
+}
+
+/** Look up the bootstrap download status for this consensus flavor
+ * and return a pointer to it. */
+MOCK_IMPL(download_status_t *,
+networkstatus_get_dl_status_by_flavor_bootstrap,(consensus_flavor_t flavor))
+{
+  download_status_t *dl = NULL;
+
+  if ((int)flavor <= N_CONSENSUS_FLAVORS) {
+    dl = &(consensus_bootstrap_dl_status[flavor]);
+  }
+
+  return dl;
+}
+
+/** Look up the running (non-bootstrap) download status for this consensus
+ * flavor and return a pointer to it. */
+MOCK_IMPL(download_status_t *,
+networkstatus_get_dl_status_by_flavor_running,(consensus_flavor_t flavor))
+{
+  download_status_t *dl = NULL;
+
+  if ((int)flavor <= N_CONSENSUS_FLAVORS) {
+    dl = &(consensus_dl_status[flavor]);
+  }
+
+  return dl;
+}
+
 /** Return the most recent consensus that we have downloaded, or NULL if we
  * don't have one. */
-networkstatus_t *
-networkstatus_get_latest_consensus(void)
+MOCK_IMPL(networkstatus_t *,
+networkstatus_get_latest_consensus,(void))
 {
   return current_consensus;
 }
@@ -1204,8 +1297,8 @@ networkstatus_get_latest_consensus_by_flavor,(consensus_flavor_t f))
 
 /** Return the most recent consensus that we have downloaded, or NULL if it is
  * no longer live. */
-networkstatus_t *
-networkstatus_get_live_consensus(time_t now)
+MOCK_IMPL(networkstatus_t *,
+networkstatus_get_live_consensus,(time_t now))
 {
   if (current_consensus &&
       current_consensus->valid_after <= now &&
@@ -2216,7 +2309,7 @@ getinfo_helper_networkstatus(control_connection_t *conn,
     if (*q == '$')
       ++q;
 
-    if (base16_decode(d, DIGEST_LEN, q, strlen(q))) {
+    if (base16_decode(d, DIGEST_LEN, q, strlen(q)) != DIGEST_LEN) {
       *errmsg = "Data not decodeable as hex";
       return -1;
     }

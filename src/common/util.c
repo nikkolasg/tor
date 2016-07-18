@@ -9,10 +9,6 @@
  * process control.
  **/
 
-/* This is required on rh7 to make strptime not complain.
- */
-#define _GNU_SOURCE
-
 #include "orconfig.h"
 #ifdef HAVE_FCNTL_H
 #include <fcntl.h>
@@ -1115,6 +1111,9 @@ tor_digest256_is_zero(const char *digest)
   /* Were there unexpected unconverted characters? */   \
   if (!next && *endptr)                                 \
     goto err;                                           \
+  /* Illogical (max, min) inputs? */                    \
+  if (BUG(max < min))                                   \
+    goto err;                                           \
   /* Is r within limits? */                             \
   if (r < min || r > max)                               \
     goto err;                                           \
@@ -1387,48 +1386,138 @@ tor_escape_str_for_pt_args(const char *string, const char *chars_to_escape)
  * Time
  * ===== */
 
+#define TOR_USEC_PER_SEC 1000000
+
+/** Return the difference between start->tv_sec and end->tv_sec.
+ * Returns INT64_MAX on overflow and underflow.
+ */
+static int64_t
+tv_secdiff_impl(const struct timeval *start, const struct timeval *end)
+{
+  const int64_t s = (int64_t)start->tv_sec;
+  const int64_t e = (int64_t)end->tv_sec;
+
+  /* This may not be the most efficient way of implemeting this check,
+   * but it's easy to see that it's correct and doesn't overflow */
+
+  if (s > 0 && e < INT64_MIN + s) {
+    /* s is positive: equivalent to e - s < INT64_MIN, but without any
+     * overflow */
+    return INT64_MAX;
+  } else if (s < 0 && e > INT64_MAX + s) {
+    /* s is negative: equivalent to e - s > INT64_MAX, but without any
+     * overflow */
+    return INT64_MAX;
+  }
+
+  return e - s;
+}
+
 /** Return the number of microseconds elapsed between *start and *end.
+ * Returns LONG_MAX on overflow and underflow.
  */
 long
 tv_udiff(const struct timeval *start, const struct timeval *end)
 {
-  long udiff;
-  long secdiff = end->tv_sec - start->tv_sec;
-
-  if (labs(secdiff)+1 > LONG_MAX/1000000) {
-    log_warn(LD_GENERAL, "comparing times on microsecond detail too far "
-             "apart: %ld seconds", secdiff);
+  /* Sanity check tv_usec */
+  if (start->tv_usec > TOR_USEC_PER_SEC || start->tv_usec < 0) {
+    log_warn(LD_GENERAL, "comparing times on microsecond detail with bad "
+             "start tv_usec: " I64_FORMAT " microseconds",
+             I64_PRINTF_ARG(start->tv_usec));
     return LONG_MAX;
   }
 
-  udiff = secdiff*1000000L + (end->tv_usec - start->tv_usec);
-  return udiff;
+  if (end->tv_usec > TOR_USEC_PER_SEC || end->tv_usec < 0) {
+    log_warn(LD_GENERAL, "comparing times on microsecond detail with bad "
+             "end tv_usec: " I64_FORMAT " microseconds",
+             I64_PRINTF_ARG(end->tv_usec));
+    return LONG_MAX;
+  }
+
+  /* Some BSDs have struct timeval.tv_sec 64-bit, but time_t (and long) 32-bit
+   */
+  int64_t udiff;
+  const int64_t secdiff = tv_secdiff_impl(start, end);
+
+  /* end->tv_usec - start->tv_usec can be up to 1 second either way */
+  if (secdiff > (int64_t)(LONG_MAX/1000000 - 1) ||
+      secdiff < (int64_t)(LONG_MIN/1000000 + 1)) {
+    log_warn(LD_GENERAL, "comparing times on microsecond detail too far "
+             "apart: " I64_FORMAT " seconds", I64_PRINTF_ARG(secdiff));
+    return LONG_MAX;
+  }
+
+  /* we'll never get an overflow here, because we check that both usecs are
+   * between 0 and TV_USEC_PER_SEC. */
+  udiff = secdiff*1000000 + ((int64_t)end->tv_usec - (int64_t)start->tv_usec);
+
+  /* Some compilers are smart enough to work out this is a no-op on L64 */
+#if SIZEOF_LONG < 8
+  if (udiff > (int64_t)LONG_MAX || udiff < (int64_t)LONG_MIN) {
+    return LONG_MAX;
+  }
+#endif
+
+  return (long)udiff;
 }
 
 /** Return the number of milliseconds elapsed between *start and *end.
+ * If the tv_usec difference is 500, rounds away from zero.
+ * Returns LONG_MAX on overflow and underflow.
  */
 long
 tv_mdiff(const struct timeval *start, const struct timeval *end)
 {
-  long mdiff;
-  long secdiff = end->tv_sec - start->tv_sec;
+  /* Sanity check tv_usec */
+  if (start->tv_usec > TOR_USEC_PER_SEC || start->tv_usec < 0) {
+    log_warn(LD_GENERAL, "comparing times on millisecond detail with bad "
+             "start tv_usec: " I64_FORMAT " microseconds",
+             I64_PRINTF_ARG(start->tv_usec));
+    return LONG_MAX;
+  }
 
-  if (labs(secdiff)+1 > LONG_MAX/1000) {
+  if (end->tv_usec > TOR_USEC_PER_SEC || end->tv_usec < 0) {
+    log_warn(LD_GENERAL, "comparing times on millisecond detail with bad "
+             "end tv_usec: " I64_FORMAT " microseconds",
+             I64_PRINTF_ARG(end->tv_usec));
+    return LONG_MAX;
+  }
+
+  /* Some BSDs have struct timeval.tv_sec 64-bit, but time_t (and long) 32-bit
+   */
+  int64_t mdiff;
+  const int64_t secdiff = tv_secdiff_impl(start, end);
+
+  /* end->tv_usec - start->tv_usec can be up to 1 second either way, but the
+   * mdiff calculation may add another temporary second for rounding.
+   * Whether this actually causes overflow depends on the compiler's constant
+   * folding and order of operations. */
+  if (secdiff > (int64_t)(LONG_MAX/1000 - 2) ||
+      secdiff < (int64_t)(LONG_MIN/1000 + 1)) {
     log_warn(LD_GENERAL, "comparing times on millisecond detail too far "
-             "apart: %ld seconds", secdiff);
+             "apart: " I64_FORMAT " seconds", I64_PRINTF_ARG(secdiff));
     return LONG_MAX;
   }
 
   /* Subtract and round */
-  mdiff = secdiff*1000L +
+  mdiff = secdiff*1000 +
       /* We add a million usec here to ensure that the result is positive,
        * so that the round-towards-zero behavior of the division will give
        * the right result for rounding to the nearest msec. Later we subtract
        * 1000 in order to get the correct result.
-       */
-      ((long)end->tv_usec - (long)start->tv_usec + 500L + 1000000L) / 1000L
+       * We'll never get an overflow here, because we check that both usecs are
+       * between 0 and TV_USEC_PER_SEC. */
+      ((int64_t)end->tv_usec - (int64_t)start->tv_usec + 500 + 1000000) / 1000
       - 1000;
-  return mdiff;
+
+  /* Some compilers are smart enough to work out this is a no-op on L64 */
+#if SIZEOF_LONG < 8
+  if (mdiff > (int64_t)LONG_MAX || mdiff < (int64_t)LONG_MIN) {
+    return LONG_MAX;
+  }
+#endif
+
+  return (long)mdiff;
 }
 
 /**
@@ -2014,6 +2103,16 @@ clean_name_for_stat(char *name)
 #endif
 }
 
+/** Wrapper for unlink() to make it mockable for the test suite; returns 0
+ * if unlinking the file succeeded, -1 and sets errno if unlinking fails.
+ */
+
+MOCK_IMPL(int,
+tor_unlink,(const char *pathname))
+{
+  return unlink(pathname);
+}
+
 /** Return:
  * FN_ERROR if filename can't be read, is NULL, or is zero-length,
  * FN_NOENT if it doesn't exist,
@@ -2077,9 +2176,9 @@ file_status(const char *fname)
  * When effective_user is not NULL, check permissions against the given user
  * and its primary group.
  */
-int
-check_private_dir(const char *dirname, cpd_check_t check,
-                  const char *effective_user)
+MOCK_IMPL(int,
+check_private_dir,(const char *dirname, cpd_check_t check,
+                   const char *effective_user))
 {
   int r;
   struct stat st;
@@ -2307,8 +2406,8 @@ check_private_dir(const char *dirname, cpd_check_t check,
  * function, and all other functions in util.c that create files, create them
  * with mode 0600.
  */
-int
-write_str_to_file(const char *fname, const char *str, int bin)
+MOCK_IMPL(int,
+write_str_to_file,(const char *fname, const char *str, int bin))
 {
 #ifdef _WIN32
   if (!bin && strchr(str, '\r')) {
@@ -2667,8 +2766,8 @@ read_file_to_str_until_eof(int fd, size_t max_bytes_to_read, size_t *sz_out)
  * the call to stat and the call to read_all: the resulting string will
  * be truncated.
  */
-char *
-read_file_to_str(const char *filename, int flags, struct stat *stat_out)
+MOCK_IMPL(char *,
+read_file_to_str, (const char *filename, int flags, struct stat *stat_out))
 {
   int fd; /* router file */
   struct stat statbuf;
@@ -3403,8 +3502,8 @@ smartlist_add_vasprintf(struct smartlist_t *sl, const char *pattern,
 /** Return a new list containing the filenames in the directory <b>dirname</b>.
  * Return NULL on error or if <b>dirname</b> is not a directory.
  */
-smartlist_t *
-tor_listdir(const char *dirname)
+MOCK_IMPL(smartlist_t *,
+tor_listdir, (const char *dirname))
 {
   smartlist_t *result;
 #ifdef _WIN32
@@ -5586,5 +5685,26 @@ clamp_double_to_int64(double number)
 
   /* Handle infinities and finite numbers with magnitude >= 2^63. */
   return signbit(number) ? INT64_MIN : INT64_MAX;
+}
+
+/** Return a uint64_t value from <b>a</b> in network byte order. */
+uint64_t
+tor_htonll(uint64_t a)
+{
+#ifdef WORDS_BIGENDIAN
+  /* Big endian. */
+  return a;
+#else /* WORDS_BIGENDIAN */
+  /* Little endian. The worst... */
+  return htonl((uint32_t)(a>>32)) |
+    (((uint64_t)htonl((uint32_t)a))<<32);
+#endif /* WORDS_BIGENDIAN */
+}
+
+/** Return a uint64_t value from <b>a</b> in host byte order. */
+uint64_t
+tor_ntohll(uint64_t a)
+{
+  return tor_htonll(a);
 }
 

@@ -1253,7 +1253,7 @@ entry_guards_parse_state(or_state_t *state, int set, char **msg)
       } else {
         strlcpy(node->nickname, smartlist_get(args,0), MAX_NICKNAME_LEN+1);
         if (base16_decode(node->identity, DIGEST_LEN, smartlist_get(args,1),
-                          strlen(smartlist_get(args,1)))<0) {
+                          strlen(smartlist_get(args,1))) != DIGEST_LEN) {
           *msg = tor_strdup("Unable to parse entry nodes: "
                             "Bad hex digest for EntryGuard");
         }
@@ -1309,8 +1309,9 @@ entry_guards_parse_state(or_state_t *state, int set, char **msg)
         log_warn(LD_BUG, "EntryGuardAddedBy line is not long enough.");
         continue;
       }
-      if (base16_decode(d, sizeof(d), line->value, HEX_DIGEST_LEN)<0 ||
-          line->value[HEX_DIGEST_LEN] != ' ') {
+      if (base16_decode(d, sizeof(d),
+                        line->value, HEX_DIGEST_LEN) != sizeof(d) ||
+                        line->value[HEX_DIGEST_LEN] != ' ') {
         log_warn(LD_BUG, "EntryGuardAddedBy line %s does not begin with "
                  "hex digest", escaped(line->value));
         continue;
@@ -2032,6 +2033,7 @@ bridge_add_from_config(bridge_line_t *bridge_line)
   if (bridge_line->transport_name)
     b->transport_name = bridge_line->transport_name;
   b->fetch_status.schedule = DL_SCHED_BRIDGE;
+  b->fetch_status.backoff = DL_SCHED_RANDOM_EXPONENTIAL;
   b->socks_args = bridge_line->socks_args;
   if (!bridge_list)
     bridge_list = smartlist_new();
@@ -2420,6 +2422,44 @@ num_bridges_usable(void)
   tor_assert(get_options()->UseBridges);
   (void) choose_random_entry_impl(NULL, 0, 0, &n_options);
   return n_options;
+}
+
+/** Return a smartlist containing all bridge identity digests */
+MOCK_IMPL(smartlist_t *,
+list_bridge_identities, (void))
+{
+  smartlist_t *result = NULL;
+  char *digest_tmp;
+
+  if (get_options()->UseBridges && bridge_list) {
+    result = smartlist_new();
+
+    SMARTLIST_FOREACH_BEGIN(bridge_list, bridge_info_t *, b) {
+      digest_tmp = tor_malloc(DIGEST_LEN);
+      memcpy(digest_tmp, b->identity, DIGEST_LEN);
+      smartlist_add(result, digest_tmp);
+    } SMARTLIST_FOREACH_END(b);
+  }
+
+  return result;
+}
+
+/** Get the download status for a bridge descriptor given its identity */
+MOCK_IMPL(download_status_t *,
+get_bridge_dl_status_by_id, (const char *digest))
+{
+  download_status_t *dl = NULL;
+
+  if (digest && get_options()->UseBridges && bridge_list) {
+    SMARTLIST_FOREACH_BEGIN(bridge_list, bridge_info_t *, b) {
+      if (tor_memeq(digest, b->identity, DIGEST_LEN)) {
+        dl = &(b->fetch_status);
+        break;
+      }
+    } SMARTLIST_FOREACH_END(b);
+  }
+
+  return dl;
 }
 
 /** Return 1 if we have at least one descriptor for an entry guard

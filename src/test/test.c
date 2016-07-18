@@ -55,6 +55,7 @@ double fabs(double x);
 #include "memarea.h"
 #include "onion.h"
 #include "onion_ntor.h"
+#include "onion_fast.h"
 #include "onion_tap.h"
 #include "policies.h"
 #include "rephist.h"
@@ -178,20 +179,26 @@ test_bad_onion_handshake(void *arg)
                                             s_buf, s_keys, 40));
 
   /* Client: Case 1: The server sent back junk. */
+  const char *msg = NULL;
   s_buf[64] ^= 33;
   tt_int_op(-1, OP_EQ,
-            onion_skin_TAP_client_handshake(c_dh, s_buf, c_keys, 40, NULL));
+            onion_skin_TAP_client_handshake(c_dh, s_buf, c_keys, 40, &msg));
   s_buf[64] ^= 33;
+  tt_str_op(msg, OP_EQ, "Digest DOES NOT MATCH on onion handshake. "
+            "Bug or attack.");
 
   /* Let the client finish; make sure it can. */
+  msg = NULL;
   tt_int_op(0, OP_EQ,
-            onion_skin_TAP_client_handshake(c_dh, s_buf, c_keys, 40, NULL));
+            onion_skin_TAP_client_handshake(c_dh, s_buf, c_keys, 40, &msg));
   tt_mem_op(s_keys,OP_EQ, c_keys, 40);
+  tt_ptr_op(msg, OP_EQ, NULL);
 
   /* Client: Case 2: The server sent back a degenerate DH. */
   memset(s_buf, 0, sizeof(s_buf));
   tt_int_op(-1, OP_EQ,
-            onion_skin_TAP_client_handshake(c_dh, s_buf, c_keys, 40, NULL));
+            onion_skin_TAP_client_handshake(c_dh, s_buf, c_keys, 40, &msg));
+  tt_str_op(msg, OP_EQ, "DH computation failed.");
 
  done:
   crypto_dh_free(c_dh);
@@ -246,9 +253,54 @@ test_ntor_handshake(void *arg)
   memset(s_buf, 0, 40);
   tt_mem_op(c_keys,OP_NE, s_buf, 40);
 
+  /* Now try with a bogus server response. Zero input should trigger
+   * All The Problems. */
+  memset(c_keys, 0, 400);
+  memset(s_buf, 0, NTOR_REPLY_LEN);
+  const char *msg = NULL;
+  tt_int_op(-1, OP_EQ, onion_skin_ntor_client_handshake(c_state, s_buf,
+                                                        c_keys, 400, &msg));
+  tt_str_op(msg, OP_EQ, "Zero output from curve25519 handshake");
+
  done:
   ntor_handshake_state_free(c_state);
   dimap_free(s_keymap, NULL);
+}
+
+static void
+test_fast_handshake(void *arg)
+{
+  /* tests for the obsolete "CREATE_FAST" handshake. */
+  (void) arg;
+  fast_handshake_state_t *state = NULL;
+  uint8_t client_handshake[CREATE_FAST_LEN];
+  uint8_t server_handshake[CREATED_FAST_LEN];
+  uint8_t s_keys[100], c_keys[100];
+
+  /* First, test an entire handshake. */
+  memset(client_handshake, 0, sizeof(client_handshake));
+  tt_int_op(0, OP_EQ, fast_onionskin_create(&state, client_handshake));
+  tt_assert(! tor_mem_is_zero((char*)client_handshake,
+                              sizeof(client_handshake)));
+
+  tt_int_op(0, OP_EQ,
+            fast_server_handshake(client_handshake, server_handshake,
+                                  s_keys, 100));
+  const char *msg = NULL;
+  tt_int_op(0, OP_EQ,
+            fast_client_handshake(state, server_handshake, c_keys, 100, &msg));
+  tt_ptr_op(msg, OP_EQ, NULL);
+  tt_mem_op(s_keys, OP_EQ, c_keys, 100);
+
+  /* Now test a failing handshake. */
+  server_handshake[0] ^= 3;
+  tt_int_op(-1, OP_EQ,
+            fast_client_handshake(state, server_handshake, c_keys, 100, &msg));
+  tt_str_op(msg, OP_EQ, "Digest DOES NOT MATCH on fast handshake. "
+            "Bug or attack.");
+
+ done:
+  fast_handshake_state_free(state);
 }
 
 /** Run unit tests for the onion queues. */
@@ -1115,6 +1167,7 @@ static struct testcase_t test_array[] = {
   { "bad_onion_handshake", test_bad_onion_handshake, 0, NULL, NULL },
   ENT(onion_queues),
   { "ntor_handshake", test_ntor_handshake, 0, NULL, NULL },
+  { "fast_handshake", test_fast_handshake, 0, NULL, NULL },
   FORK(circuit_timeout),
   FORK(rend_fns),
   ENT(geoip),
@@ -1170,6 +1223,7 @@ struct testgroup_t testgroups[] = {
   { "routerset/" , routerset_tests },
   { "scheduler/", scheduler_tests },
   { "socks/", socks_tests },
+  { "shared-random/", sr_tests },
   { "status/" , status_tests },
   { "tortls/", tortls_tests },
   { "util/", util_tests },

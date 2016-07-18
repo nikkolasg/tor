@@ -17,8 +17,8 @@
 
 static const int RECENT_TIME = -10;
 static const int TIME_IN_THE_PAST = -(REND_CACHE_MAX_AGE + \
-                                      REND_CACHE_MAX_SKEW + 10);
-static const int TIME_IN_THE_FUTURE = REND_CACHE_MAX_SKEW + 10;
+                                      REND_CACHE_MAX_SKEW + 60);
+static const int TIME_IN_THE_FUTURE = REND_CACHE_MAX_SKEW + 60;
 
 static rend_data_t *
 mock_rend_data(const char *onion_address)
@@ -971,7 +971,7 @@ test_rend_cache_entry_free(void *data)
 
   // Handles non-NULL descriptor correctly
   e = tor_malloc_zero(sizeof(rend_cache_entry_t));
-  e->desc = (char *)malloc(10);
+  e->desc = tor_malloc(10);
   rend_cache_entry_free(e);
 
  /* done: */

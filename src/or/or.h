@@ -1987,6 +1987,15 @@ typedef enum {
 #define download_schedule_increment_bitfield_t \
                                         ENUM_BF(download_schedule_increment_t)
 
+/** Enumeration: do we want to use the random exponential backoff
+ * mechanism? */
+typedef enum {
+  DL_SCHED_DETERMINISTIC = 0,
+  DL_SCHED_RANDOM_EXPONENTIAL = 1,
+} download_schedule_backoff_t;
+#define download_schedule_backoff_bitfield_t \
+                                        ENUM_BF(download_schedule_backoff_t)
+
 /** Information about our plans for retrying downloads for a downloadable
  * directory object.
  * Each type of downloadable directory object has a corresponding retry
@@ -2033,6 +2042,15 @@ typedef struct download_status_t {
   download_schedule_increment_bitfield_t increment_on : 1; /**< does this
                                         * schedule increment on each attempt,
                                         * or after each failure? */
+  download_schedule_backoff_bitfield_t backoff : 1; /**< do we use the
+                                        * deterministic schedule, or random
+                                        * exponential backoffs? */
+  uint8_t last_backoff_position; /**< number of attempts/failures, depending
+                                  * on increment_on, when we last recalculated
+                                  * the delay.  Only updated if backoff
+                                  * == 1. */
+  int last_delay_used; /**< last delay used for random exponential backoff;
+                        * only updated if backoff == 1 */
 } download_status_t;
 
 /** If n_download_failures is this high, the download can never happen. */
@@ -2505,6 +2523,18 @@ typedef struct networkstatus_voter_info_t {
   smartlist_t *sigs;
 } networkstatus_voter_info_t;
 
+typedef struct networkstatus_sr_info_t {
+  /* Indicate if the dirauth partitipates in the SR protocol with its vote.
+   * This is tied to the SR flag in the vote. */
+  unsigned int participate:1;
+  /* Both vote and consensus: Current and previous SRV. If list is empty,
+   * this means none were found in either the consensus or vote. */
+  struct sr_srv_t *previous_srv;
+  struct sr_srv_t *current_srv;
+  /* Vote only: List of commitments. */
+  smartlist_t *commits;
+} networkstatus_sr_info_t;
+
 /** Enumerates the possible seriousness values of a networkstatus document. */
 typedef enum {
   NS_TYPE_VOTE,
@@ -2587,6 +2617,9 @@ typedef struct networkstatus_t {
   /** If present, a map from descriptor digest to elements of
    * routerstatus_list. */
   digestmap_t *desc_digest_map;
+
+  /** Contains the shared random protocol data from a vote or consensus. */
+  networkstatus_sr_info_t sr_info;
 } networkstatus_t;
 
 /** A set of signatures for a networkstatus consensus.  Unless otherwise
@@ -3555,7 +3588,13 @@ typedef struct {
   /** Bitmask; derived from AllowInvalidNodes. */
   invalid_router_usage_t AllowInvalid_;
   config_line_t *ExitPolicy; /**< Lists of exit policy components. */
-  int ExitPolicyRejectPrivate; /**< Should we not exit to local addresses? */
+  int ExitPolicyRejectPrivate; /**< Should we not exit to reserved private
+                                * addresses, and our own published addresses?
+                                */
+  int ExitPolicyRejectLocalInterfaces; /**< Should we not exit to local
+                                        * interface addresses?
+                                        * Includes OutboundBindAddresses and
+                                        * configured ports. */
   config_line_t *SocksPolicy; /**< Lists of socks policy components */
   config_line_t *DirPolicy; /**< Lists of dir policy components */
   /** Addresses to bind for listening for SOCKS connections. */
@@ -4480,6 +4519,17 @@ typedef struct {
 
   /** Autobool: Do we try to retain capabilities if we can? */
   int KeepBindCapabilities;
+
+  /** Maximum total size of unparseable descriptors to log during the
+   * lifetime of this Tor process.
+   */
+  uint64_t MaxUnparseableDescSizeToLog;
+
+  /** Bool (default: 1): Switch for the shared random protocol. Only
+   * relevant to a directory authority. If off, the authority won't
+   * participate in the protocol. If on (default), a flag is added to the
+   * vote indicating participation. */
+  int AuthDirSharedRandomness;
 } or_options_t;
 
 /** Persistent state for an onion router, as saved to disk. */

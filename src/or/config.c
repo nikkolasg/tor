@@ -244,6 +244,7 @@ static config_var_t option_vars_[] = {
   V(ExitNodes,                   ROUTERSET, NULL),
   V(ExitPolicy,                  LINELIST, NULL),
   V(ExitPolicyRejectPrivate,     BOOL,     "1"),
+  V(ExitPolicyRejectLocalInterfaces, BOOL, "0"),
   V(ExitPortStatistics,          BOOL,     "0"),
   V(ExtendAllowPrivateAddresses, BOOL,     "0"),
   V(ExitRelay,                   AUTOBOOL, "auto"),
@@ -325,6 +326,7 @@ static config_var_t option_vars_[] = {
   VAR("MaxMemInQueues",          MEMUNIT,   MaxMemInQueues_raw, "0"),
   OBSOLETE("MaxOnionsPending"),
   V(MaxOnionQueueDelay,          MSEC_INTERVAL, "1750 msec"),
+  V(MaxUnparseableDescSizeToLog, MEMUNIT, "10 MB"),
   V(MinMeasuredBWsForAuthToIgnoreAdvertised, INT, "500"),
   V(MyFamily,                    STRING,   NULL),
   V(NewCircuitPeriod,            INTERVAL, "30 seconds"),
@@ -439,6 +441,7 @@ static config_var_t option_vars_[] = {
   V(UseNTorHandshake,            AUTOBOOL, "1"),
   V(User,                        STRING,   NULL),
   V(UserspaceIOCPBuffers,        BOOL,     "0"),
+  V(AuthDirSharedRandomness,     BOOL,     "1"),
   OBSOLETE("V1AuthoritativeDirectory"),
   OBSOLETE("V2AuthoritativeDirectory"),
   VAR("V3AuthoritativeDirectory",BOOL, V3AuthoritativeDir,   "0"),
@@ -916,11 +919,6 @@ static const char *default_authorities[] = {
   "dannenberg orport=443 "
     "v3ident=0232AF901C31A04EE9848595AF9BB7620D4C5B2E "
     "193.23.244.244:80 7BE6 83E6 5D48 1413 21C5 ED92 F075 C553 64AC 7123",
-  "urras orport=80 "
-    "v3ident=80550987E1D626E3EBA5E5E75A458DE0626D088C "
-    "208.83.223.34:443 0AD3 FA88 4D18 F89E EA2D 89C0 1937 9E0E 7FD9 4417"
-    /* XX/teor - urras may have an IPv6 address, but it's not in urras'
-     * descriptor as of 11 Dec 2015. See #17813. */,
   "maatuska orport=80 "
     "v3ident=49015F787433103580E3B66A1707A00E60F2D15B "
     "ipv6=[2001:67c:289c::9]:80 "
@@ -2074,7 +2072,7 @@ config_parse_commandline(int argc, char **argv, int ignore_errors,
 
     if (want_arg == ARGUMENT_NECESSARY && is_last) {
       if (ignore_errors) {
-        arg = strdup("");
+        arg = tor_strdup("");
       } else {
         log_warn(LD_CONFIG,"Command-line option '%s' with no value. Failing.",
             argv[i]);
@@ -4124,11 +4122,11 @@ have_enough_mem_for_dircache(const or_options_t *options, size_t total_mem,
   if (options->DirCache) {
     if (total_mem < DIRCACHE_MIN_BANDWIDTH) {
       if (options->BridgeRelay) {
-        *msg = strdup("Running a Bridge with less than "
+        *msg = tor_strdup("Running a Bridge with less than "
                       STRINGIFY(DIRCACHE_MIN_MB_BANDWIDTH) " MB of memory is "
                       "not recommended.");
       } else {
-        *msg = strdup("Being a directory cache (default) with less than "
+        *msg = tor_strdup("Being a directory cache (default) with less than "
                       STRINGIFY(DIRCACHE_MIN_MB_BANDWIDTH) " MB of memory is "
                       "not recommended and may consume most of the available "
                       "resources, consider disabling this functionality by "
@@ -4137,7 +4135,7 @@ have_enough_mem_for_dircache(const or_options_t *options, size_t total_mem,
     }
   } else {
     if (total_mem >= DIRCACHE_MIN_BANDWIDTH) {
-      *msg = strdup("DirCache is disabled and we are configured as a "
+      *msg = tor_strdup("DirCache is disabled and we are configured as a "
                "relay. This may disqualify us from becoming a guard in the "
                "future.");
     }
@@ -4319,6 +4317,8 @@ options_transition_affects_descriptor(const or_options_t *old_options,
       old_options->ExitRelay != new_options->ExitRelay ||
       old_options->ExitPolicyRejectPrivate !=
         new_options->ExitPolicyRejectPrivate ||
+      old_options->ExitPolicyRejectLocalInterfaces !=
+        new_options->ExitPolicyRejectLocalInterfaces ||
       old_options->IPv6Exit != new_options->IPv6Exit ||
       !config_lines_eq(old_options->ORPort_lines,
                        new_options->ORPort_lines) ||
@@ -5330,7 +5330,7 @@ parse_bridge_line(const char *line)
       goto err;
     }
     if (base16_decode(bridge_line->digest, DIGEST_LEN,
-                      fingerprint, HEX_DIGEST_LEN)<0) {
+                      fingerprint, HEX_DIGEST_LEN) != DIGEST_LEN) {
       log_warn(LD_CONFIG, "Unable to decode Bridge key digest.");
       goto err;
     }
@@ -5781,7 +5781,8 @@ parse_dir_authority_line(const char *line, dirinfo_type_t required_type,
     } else if (!strcasecmpstart(flag, "v3ident=")) {
       char *idstr = flag + strlen("v3ident=");
       if (strlen(idstr) != HEX_DIGEST_LEN ||
-          base16_decode(v3_digest, DIGEST_LEN, idstr, HEX_DIGEST_LEN)<0) {
+          base16_decode(v3_digest, DIGEST_LEN,
+                        idstr, HEX_DIGEST_LEN) != DIGEST_LEN) {
         log_warn(LD_CONFIG, "Bad v3 identity digest '%s' on DirAuthority line",
                  flag);
       } else {
@@ -5830,7 +5831,8 @@ parse_dir_authority_line(const char *line, dirinfo_type_t required_type,
              fingerprint, (int)strlen(fingerprint));
     goto err;
   }
-  if (base16_decode(digest, DIGEST_LEN, fingerprint, HEX_DIGEST_LEN)<0) {
+  if (base16_decode(digest, DIGEST_LEN,
+                    fingerprint, HEX_DIGEST_LEN) != DIGEST_LEN) {
     log_warn(LD_CONFIG, "Unable to decode DirAuthority key digest.");
     goto err;
   }
@@ -5898,8 +5900,8 @@ parse_dir_fallback_line(const char *line,
       orport = (int)tor_parse_long(cp+strlen("orport="), 10,
                                    1, 65535, &ok, NULL);
     } else if (!strcmpstart(cp, "id=")) {
-      ok = !base16_decode(id, DIGEST_LEN,
-                          cp+strlen("id="), strlen(cp)-strlen("id="));
+      ok = base16_decode(id, DIGEST_LEN, cp+strlen("id="),
+                         strlen(cp)-strlen("id=")) == DIGEST_LEN;
     } else if (!strcasecmpstart(cp, "ipv6=")) {
       if (ipv6_addrport_ptr) {
         log_warn(LD_CONFIG, "Redundant ipv6 addr/port on FallbackDir line");
@@ -7200,8 +7202,6 @@ init_libevent(const or_options_t *options)
    */
   suppress_libevent_log_msg("Function not implemented");
 
-  tor_check_libevent_header_compatibility();
-
   memset(&cfg, 0, sizeof(cfg));
   cfg.disable_iocp = options->DisableIOCP;
   cfg.num_cpus = get_num_cpus(options);
@@ -7226,10 +7226,10 @@ init_libevent(const or_options_t *options)
  *
  * Note: Consider using the get_datadir_fname* macros in or.h.
  */
-char *
-options_get_datadir_fname2_suffix(const or_options_t *options,
-                                  const char *sub1, const char *sub2,
-                                  const char *suffix)
+MOCK_IMPL(char *,
+options_get_datadir_fname2_suffix,(const or_options_t *options,
+                                   const char *sub1, const char *sub2,
+                                   const char *suffix))
 {
   char *fname = NULL;
   size_t len;

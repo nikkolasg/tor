@@ -38,6 +38,17 @@ routerstatus_t *networkstatus_vote_find_mutable_entry(networkstatus_t *ns,
 int networkstatus_vote_find_entry_idx(networkstatus_t *ns,
                                       const char *digest, int *found_out);
 
+MOCK_DECL(download_status_t *,
+  networkstatus_get_dl_status_by_flavor,
+  (consensus_flavor_t flavor));
+MOCK_DECL(download_status_t *,
+  networkstatus_get_dl_status_by_flavor_bootstrap,
+  (consensus_flavor_t flavor));
+MOCK_DECL(download_status_t *,
+  networkstatus_get_dl_status_by_flavor_running,
+  (consensus_flavor_t flavor));
+
+MOCK_DECL(smartlist_t *, router_get_descriptor_digests, (void));
 MOCK_DECL(download_status_t *,router_get_dl_status_by_descriptor_digest,
           (const char *d));
 
@@ -64,10 +75,10 @@ void update_certificate_downloads(time_t now);
 int consensus_is_waiting_for_certs(void);
 int client_would_use_router(const routerstatus_t *rs, time_t now,
                             const or_options_t *options);
-networkstatus_t *networkstatus_get_latest_consensus(void);
+MOCK_DECL(networkstatus_t *,networkstatus_get_latest_consensus,(void));
 MOCK_DECL(networkstatus_t *,networkstatus_get_latest_consensus_by_flavor,
           (consensus_flavor_t f));
-networkstatus_t *networkstatus_get_live_consensus(time_t now);
+MOCK_DECL(networkstatus_t *, networkstatus_get_live_consensus,(time_t now));
 networkstatus_t *networkstatus_get_reasonably_live_consensus(time_t now,
                                                              int flavor);
 MOCK_DECL(int, networkstatus_consensus_is_bootstrapping,(time_t now));

@@ -57,6 +57,7 @@
 #include "routerlist.h"
 #include "routerparse.h"
 #include "scheduler.h"
+#include "shared_random.h"
 #include "statefile.h"
 #include "status.h"
 #include "util_process.h"
@@ -68,11 +69,7 @@
 #include "memarea.h"
 #include "sandbox.h"
 
-#ifdef HAVE_EVENT2_EVENT_H
 #include <event2/event.h>
-#else
-#include <event.h>
-#endif
 
 #ifdef USE_BUFFEREVENTS
 #include <event2/bufferevent.h>
@@ -2004,18 +2001,24 @@ check_fw_helper_app_callback(time_t now, const or_options_t *options)
   return PORT_FORWARDING_CHECK_INTERVAL;
 }
 
+/** Callback to write heartbeat message in the logs. */
 static int
 heartbeat_callback(time_t now, const or_options_t *options)
 {
   static int first = 1;
-  /* 12. write the heartbeat message */
+
+  /* Check if heartbeat is disabled */
+  if (!options->HeartbeatPeriod) {
+    return PERIODIC_EVENT_NO_UPDATE;
+  }
+
+  /* Write the heartbeat message */
   if (first) {
     first = 0; /* Skip the first one. */
   } else {
     log_heartbeat(now);
   }
-  /* XXXX This isn't such a good way to handle possible changes in the
-   * callback event */
+
   return options->HeartbeatPeriod;
 }
 
@@ -2214,8 +2217,8 @@ ip_address_changed(int at_interface)
 {
   const or_options_t *options = get_options();
   int server = server_mode(options);
-  int exit_reject_private = (server && options->ExitRelay
-                             && options->ExitPolicyRejectPrivate);
+  int exit_reject_interfaces = (server && options->ExitRelay
+                                && options->ExitPolicyRejectLocalInterfaces);
 
   if (at_interface) {
     if (! server) {
@@ -2233,8 +2236,8 @@ ip_address_changed(int at_interface)
   }
 
   /* Exit relays incorporate interface addresses in their exit policies when
-   * ExitPolicyRejectPrivate is set */
-  if (exit_reject_private || (server && !at_interface)) {
+   * ExitPolicyRejectLocalInterfaces is set */
+  if (exit_reject_interfaces || (server && !at_interface)) {
     mark_my_descriptor_dirty("IP address changed");
   }
 
@@ -2439,6 +2442,13 @@ do_main_loop(void)
   if (server_mode(get_options())) {
     /* launch cpuworkers. Need to do this *after* we've read the onion key. */
     cpu_init();
+  }
+
+  /* Setup shared random protocol subsystem. */
+  if (authdir_mode_publishes_statuses(get_options())) {
+    if (sr_init(1) < 0) {
+      return -1;
+    }
   }
 
   /* set up once-a-second callback. */
@@ -3039,6 +3049,9 @@ tor_init(int argc, char *argv[])
     log_warn(LD_NET, "Problem initializing libevent RNG.");
   }
 
+  /* Scan/clean unparseable descroptors; after reading config */
+  routerparse_init();
+
   return 0;
 }
 
@@ -3140,6 +3153,7 @@ tor_free_all(int postfork)
   scheduler_free_all();
   nodelist_free_all();
   microdesc_free_all();
+  routerparse_free_all();
   ext_orport_free_all();
   control_free_all();
   sandbox_free_getaddrinfo_cache();
@@ -3204,6 +3218,9 @@ tor_cleanup(void)
       accounting_record_bandwidth_usage(now, get_or_state());
     or_state_mark_dirty(get_or_state(), 0); /* force an immediate save. */
     or_state_save(now);
+    if (authdir_mode(options)) {
+      sr_save_and_cleanup();
+    }
     if (authdir_mode_tests_reachability(options))
       rep_hist_record_mtbf_data(now, 0);
     keypin_close_journal();
@@ -3362,6 +3379,7 @@ sandbox_init_filter(void)
   OPEN_DATADIR_SUFFIX("cached-extrainfo.new", ".tmp");
   OPEN_DATADIR("cached-extrainfo.tmp.tmp");
   OPEN_DATADIR_SUFFIX("state", ".tmp");
+  OPEN_DATADIR_SUFFIX("sr-state", ".tmp");
   OPEN_DATADIR_SUFFIX("unparseable-desc", ".tmp");
   OPEN_DATADIR_SUFFIX("v3-status-votes", ".tmp");
   OPEN_DATADIR("key-pinning-journal");
@@ -3414,6 +3432,7 @@ sandbox_init_filter(void)
   RENAME_SUFFIX("cached-extrainfo", ".new");
   RENAME_SUFFIX("cached-extrainfo.new", ".tmp");
   RENAME_SUFFIX("state", ".tmp");
+  RENAME_SUFFIX("sr-state", ".tmp");
   RENAME_SUFFIX("unparseable-desc", ".tmp");
   RENAME_SUFFIX("v3-status-votes", ".tmp");
 
@@ -3519,6 +3538,7 @@ sandbox_init_filter(void)
     OPEN_DATADIR2_SUFFIX("stats", "exit-stats", ".tmp");
     OPEN_DATADIR2_SUFFIX("stats", "buffer-stats", ".tmp");
     OPEN_DATADIR2_SUFFIX("stats", "conn-stats", ".tmp");
+    OPEN_DATADIR2_SUFFIX("stats", "hidserv-stats", ".tmp");
 
     OPEN_DATADIR("approved-routers");
     OPEN_DATADIR_SUFFIX("fingerprint", ".tmp");
@@ -3557,6 +3577,7 @@ sandbox_init_filter(void)
              get_datadir_fname2("keys", "secret_onion_key_ntor.old"));
 
     STAT_DATADIR("keys");
+    OPEN_DATADIR("stats");
     STAT_DATADIR("stats");
     STAT_DATADIR2("stats", "dirreq-stats");
   }

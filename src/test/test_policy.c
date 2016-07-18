@@ -804,7 +804,7 @@ mock_get_interface_address6_list(int severity,
   tt_assert(template_list);
 
   SMARTLIST_FOREACH_BEGIN(template_list, tor_addr_t *, src_addr) {
-    tor_addr_t *dest_addr = malloc(sizeof(tor_addr_t));
+    tor_addr_t *dest_addr = tor_malloc(sizeof(tor_addr_t));
     memset(dest_addr, 0, sizeof(*dest_addr));
     tor_addr_copy_tight(dest_addr, src_addr);
     smartlist_add(clone_list, dest_addr);
@@ -1082,15 +1082,47 @@ test_policies_getinfo_helper_policies(void *arg)
   append_exit_policy_string(&mock_my_routerinfo.exit_policy, "reject *6:*");
 
   mock_options.IPv6Exit = 1;
-  mock_options.ExitPolicyRejectPrivate = 1;
   tor_addr_from_ipv4h(&mock_options.OutboundBindAddressIPv4_, TEST_IPV4_ADDR);
   tor_addr_parse(&mock_options.OutboundBindAddressIPv6_, TEST_IPV6_ADDR);
+
+  mock_options.ExitPolicyRejectPrivate = 1;
+  mock_options.ExitPolicyRejectLocalInterfaces = 1;
 
   rv = getinfo_helper_policies(NULL, "exit-policy/reject-private/relay",
                                &answer, &errmsg);
   tt_assert(rv == 0);
   tt_assert(answer != NULL);
   tt_assert(strlen(answer) > 0);
+  tor_free(answer);
+
+  mock_options.ExitPolicyRejectPrivate = 1;
+  mock_options.ExitPolicyRejectLocalInterfaces = 0;
+
+  rv = getinfo_helper_policies(NULL, "exit-policy/reject-private/relay",
+                               &answer, &errmsg);
+  tt_assert(rv == 0);
+  tt_assert(answer != NULL);
+  tt_assert(strlen(answer) > 0);
+  tor_free(answer);
+
+  mock_options.ExitPolicyRejectPrivate = 0;
+  mock_options.ExitPolicyRejectLocalInterfaces = 1;
+
+  rv = getinfo_helper_policies(NULL, "exit-policy/reject-private/relay",
+                               &answer, &errmsg);
+  tt_assert(rv == 0);
+  tt_assert(answer != NULL);
+  tt_assert(strlen(answer) > 0);
+  tor_free(answer);
+
+  mock_options.ExitPolicyRejectPrivate = 0;
+  mock_options.ExitPolicyRejectLocalInterfaces = 0;
+
+  rv = getinfo_helper_policies(NULL, "exit-policy/reject-private/relay",
+                               &answer, &errmsg);
+  tt_assert(rv == 0);
+  tt_assert(answer != NULL);
+  tt_assert(strlen(answer) == 0);
   tor_free(answer);
 
   rv = getinfo_helper_policies(NULL, "exit-policy/ipv4", &answer,

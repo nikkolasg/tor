@@ -13,6 +13,7 @@
 #include "test.h"
 #include "memarea.h"
 #include "util_process.h"
+#include "log_test_helpers.h"
 
 #ifdef HAVE_PWD_H
 #include <pwd.h>
@@ -272,35 +273,311 @@ test_util_time(void *arg)
 
   tt_int_op(0L,OP_EQ, tv_udiff(&start, &end));
   tt_int_op(0L,OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(0L,OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(0L,OP_EQ, tv_mdiff(&end, &start));
 
   end.tv_usec = 7000;
 
   tt_int_op(2000L,OP_EQ, tv_udiff(&start, &end));
   tt_int_op(2L,OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(-2000L,OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(-2L,OP_EQ, tv_mdiff(&end, &start));
 
   end.tv_sec = 6;
 
   tt_int_op(1002000L,OP_EQ, tv_udiff(&start, &end));
   tt_int_op(1002L,OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(-1002000L,OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(-1002L,OP_EQ, tv_mdiff(&end, &start));
 
   end.tv_usec = 0;
 
   tt_int_op(995000L,OP_EQ, tv_udiff(&start, &end));
   tt_int_op(995L,OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(-995000L,OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(-995L,OP_EQ, tv_mdiff(&end, &start));
 
   end.tv_sec = 4;
 
   tt_int_op(-1005000L,OP_EQ, tv_udiff(&start, &end));
   tt_int_op(-1005L,OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(1005000L,OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(1005L,OP_EQ, tv_mdiff(&end, &start));
+
+  /* Negative tv_sec values, these will break on platforms where tv_sec is
+   * unsigned */
+
+  end.tv_sec = -10;
+
+  tt_int_op(-15005000L,OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(-15005L,OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(15005000L,OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(15005L,OP_EQ, tv_mdiff(&end, &start));
+
+  start.tv_sec = -100;
+
+  tt_int_op(89995000L,OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(89995L,OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(-89995000L,OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(-89995L,OP_EQ, tv_mdiff(&end, &start));
+
+  /* Test that tv_usec values round away from zero when converted to msec */
+  start.tv_sec = 0;
+  start.tv_usec = 0;
+  end.tv_sec = 10;
+  end.tv_usec = 499;
+
+  tt_int_op(10000499L, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(10000L, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(-10000499L, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(-10000L, OP_EQ, tv_mdiff(&end, &start));
+
+  start.tv_sec = 0;
+  start.tv_usec = 0;
+  end.tv_sec = 10;
+  end.tv_usec = 500;
+
+  tt_int_op(10000500L, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(10001L, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(-10000500L, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(-10000L, OP_EQ, tv_mdiff(&end, &start));
+
+  start.tv_sec = 0;
+  start.tv_usec = 0;
+  end.tv_sec = 10;
+  end.tv_usec = 501;
+
+  tt_int_op(10000501L, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(10001L, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(-10000501L, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(-10001L, OP_EQ, tv_mdiff(&end, &start));
+
+  /* Overflow conditions */
 
 #ifdef _WIN32
   /* Would you believe that tv_sec is a long on windows? Of course you would.*/
-  end.tv_sec = LONG_MAX;
+#define TV_SEC_MAX LONG_MAX
+#define TV_SEC_MIN LONG_MIN
 #else
-  end.tv_sec = TIME_MAX;
+  /* Some BSDs have struct timeval.tv_sec 64-bit, but time_t (and long) 32-bit
+   * Which means TIME_MAX is not actually the maximum value of tv_sec.
+   * But that's ok for the moment, because the code correctly performs 64-bit
+   * calculations internally, then catches the overflow. */
+#define TV_SEC_MAX TIME_MAX
+#define TV_SEC_MIN TIME_MIN
 #endif
+
+/* Assume tv_usec is an unsigned integer until proven otherwise */
+#define TV_USEC_MAX UINT_MAX
+#define TOR_USEC_PER_SEC 1000000
+
+  /* Overflows in the result type */
+
+  /* All comparisons work */
+  start.tv_sec = 0;
+  start.tv_usec = 0;
+  end.tv_sec = LONG_MAX/1000 - 2;
+  end.tv_usec = 0;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(end.tv_sec*1000L, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(-end.tv_sec*1000L, OP_EQ, tv_mdiff(&end, &start));
+
+  start.tv_sec = 0;
+  start.tv_usec = 0;
+  end.tv_sec = LONG_MAX/1000000 - 1;
+  end.tv_usec = 0;
+
+  tt_int_op(end.tv_sec*1000000L, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(end.tv_sec*1000L, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(-end.tv_sec*1000000L, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(-end.tv_sec*1000L, OP_EQ, tv_mdiff(&end, &start));
+
+  /* No comparisons work */
+  start.tv_sec = 0;
+  start.tv_usec = 0;
+  end.tv_sec = LONG_MAX/1000 + 1;
+  end.tv_usec = 0;
+
   tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
   tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
+
+  start.tv_sec = 0;
+  start.tv_usec = 0;
+  end.tv_sec = LONG_MAX/1000000 + 1;
+  end.tv_usec = 0;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(end.tv_sec*1000L, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(-end.tv_sec*1000L, OP_EQ, tv_mdiff(&end, &start));
+
+  start.tv_sec = 0;
+  start.tv_usec = 0;
+  end.tv_sec = LONG_MAX/1000;
+  end.tv_usec = TOR_USEC_PER_SEC;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
+
+  start.tv_sec = 0;
+  start.tv_usec = 0;
+  end.tv_sec = LONG_MAX/1000000;
+  end.tv_usec = TOR_USEC_PER_SEC;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op((end.tv_sec + 1)*1000L, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(-(end.tv_sec + 1)*1000L, OP_EQ, tv_mdiff(&end, &start));
+
+  /* Overflows on comparison to zero */
+
+  start.tv_sec = 0;
+  start.tv_usec = 0;
+
+  end.tv_sec = TV_SEC_MAX;
+  end.tv_usec = 0;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
+
+  end.tv_sec = TV_SEC_MAX;
+  end.tv_usec = TOR_USEC_PER_SEC;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
+
+  end.tv_sec = 0;
+  end.tv_usec = TV_USEC_MAX;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
+
+  end.tv_sec = TV_SEC_MAX;
+  end.tv_usec = TV_USEC_MAX;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
+
+  end.tv_sec = 0;
+  end.tv_usec = 0;
+
+  start.tv_sec = TV_SEC_MIN;
+  start.tv_usec = 0;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
+
+  start.tv_sec = TV_SEC_MIN;
+  start.tv_usec = TOR_USEC_PER_SEC;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
+
+  start.tv_sec = TV_SEC_MIN;
+  start.tv_usec = TV_USEC_MAX;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
+
+  /* overflows on comparison to maxima / minima */
+
+  start.tv_sec = TV_SEC_MIN;
+  start.tv_usec = 0;
+
+  end.tv_sec = TV_SEC_MAX;
+  end.tv_usec = 0;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
+
+  end.tv_sec = TV_SEC_MAX;
+  end.tv_usec = TOR_USEC_PER_SEC;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
+
+  end.tv_sec = TV_SEC_MAX;
+  end.tv_usec = 0;
+
+  start.tv_sec = TV_SEC_MIN;
+  start.tv_usec = 0;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
+
+  start.tv_sec = TV_SEC_MIN;
+  start.tv_usec = TOR_USEC_PER_SEC;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
+
+  /* overflows on comparison to maxima / minima with extra usec */
+
+  start.tv_sec = TV_SEC_MIN;
+  start.tv_usec = TOR_USEC_PER_SEC;
+
+  end.tv_sec = TV_SEC_MAX;
+  end.tv_usec = 0;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
+
+  end.tv_sec = TV_SEC_MAX;
+  end.tv_usec = TOR_USEC_PER_SEC;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
+
+  end.tv_sec = TV_SEC_MAX;
+  end.tv_usec = TOR_USEC_PER_SEC;
+
+  start.tv_sec = TV_SEC_MIN;
+  start.tv_usec = 0;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
+
+  start.tv_sec = TV_SEC_MIN;
+  start.tv_usec = TOR_USEC_PER_SEC;
+
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&start, &end));
+  tt_int_op(LONG_MAX, OP_EQ, tv_udiff(&end, &start));
+  tt_int_op(LONG_MAX, OP_EQ, tv_mdiff(&end, &start));
 
   /* Test tor_timegm & tor_gmtime_r */
 
@@ -1501,6 +1778,11 @@ test_util_strmisc(void *arg)
   tt_int_op(-50L,OP_EQ, tor_parse_long("-50 plus garbage",10,-100,100,&i,&cp));
   tt_int_op(1,OP_EQ, i);
   tt_str_op(cp,OP_EQ, " plus garbage");
+  /* Illogical min max */
+  tt_int_op(0L,OP_EQ,  tor_parse_long("10",10,50,4,&i,NULL));
+  tt_int_op(0,OP_EQ, i);
+  tt_int_op(0L,OP_EQ,   tor_parse_long("-50",10,100,-100,&i,NULL));
+  tt_int_op(0,OP_EQ, i);
   /* Out of bounds */
   tt_int_op(0L,OP_EQ,  tor_parse_long("10",10,50,100,&i,NULL));
   tt_int_op(0,OP_EQ, i);
@@ -1821,22 +2103,21 @@ test_util_gzip(void *arg)
   (void)arg;
   buf1 = tor_strdup("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAZAAAAAAAAAAAAAAAAAAAZ");
   tt_assert(detect_compression_method(buf1, strlen(buf1)) == UNKNOWN_METHOD);
-  if (is_gzip_supported()) {
-    tt_assert(!tor_gzip_compress(&buf2, &len1, buf1, strlen(buf1)+1,
-                                   GZIP_METHOD));
-    tt_assert(buf2);
-    tt_assert(len1 < strlen(buf1));
-    tt_assert(detect_compression_method(buf2, len1) == GZIP_METHOD);
 
-    tt_assert(!tor_gzip_uncompress(&buf3, &len2, buf2, len1,
-                                     GZIP_METHOD, 1, LOG_INFO));
-    tt_assert(buf3);
-    tt_int_op(strlen(buf1) + 1,OP_EQ, len2);
-    tt_str_op(buf1,OP_EQ, buf3);
+  tt_assert(!tor_gzip_compress(&buf2, &len1, buf1, strlen(buf1)+1,
+                               GZIP_METHOD));
+  tt_assert(buf2);
+  tt_assert(len1 < strlen(buf1));
+  tt_assert(detect_compression_method(buf2, len1) == GZIP_METHOD);
 
-    tor_free(buf2);
-    tor_free(buf3);
-  }
+  tt_assert(!tor_gzip_uncompress(&buf3, &len2, buf2, len1,
+                                 GZIP_METHOD, 1, LOG_INFO));
+  tt_assert(buf3);
+  tt_int_op(strlen(buf1) + 1,OP_EQ, len2);
+  tt_str_op(buf1,OP_EQ, buf3);
+
+  tor_free(buf2);
+  tor_free(buf3);
 
   tt_assert(!tor_gzip_compress(&buf2, &len1, buf1, strlen(buf1)+1,
                                  ZLIB_METHOD));
@@ -1918,6 +2199,52 @@ test_util_gzip(void *arg)
   tor_free(buf2);
   tor_free(buf3);
   tor_free(buf1);
+}
+
+static void
+test_util_gzip_compression_bomb(void *arg)
+{
+  /* A 'compression bomb' is a very small object that uncompresses to a huge
+   * one. Most compression formats support them, but they can be a DOS vector.
+   * In Tor we try not to generate them, and we don't accept them.
+   */
+  (void) arg;
+  size_t one_million = 1<<20;
+  char *one_mb = tor_malloc_zero(one_million);
+  char *result = NULL;
+  size_t result_len = 0;
+  tor_zlib_state_t *state = NULL;
+
+  /* Make sure we can't produce a compression bomb */
+  tt_int_op(-1, OP_EQ, tor_gzip_compress(&result, &result_len,
+                                         one_mb, one_million,
+                                         ZLIB_METHOD));
+
+  /* Here's a compression bomb that we made manually. */
+  const char compression_bomb[1039] =
+    { 0x78, 0xDA, 0xED, 0xC1, 0x31, 0x01, 0x00, 0x00, 0x00, 0xC2,
+      0xA0, 0xF5, 0x4F, 0x6D, 0x08, 0x5F, 0xA0 /* .... */ };
+  tt_int_op(-1, OP_EQ, tor_gzip_uncompress(&result, &result_len,
+                                           compression_bomb, 1039,
+                                           ZLIB_METHOD, 0, LOG_WARN));
+
+  /* Now try streaming that. */
+  state = tor_zlib_new(0, ZLIB_METHOD, HIGH_COMPRESSION);
+  tor_zlib_output_t r;
+  const char *inp = compression_bomb;
+  size_t inlen = 1039;
+  do {
+    char *outp = one_mb;
+    size_t outleft = 4096; /* small on purpose */
+    r = tor_zlib_process(state, &outp, &outleft, &inp, &inlen, 0);
+    tt_int_op(inlen, OP_NE, 0);
+  } while (r == TOR_ZLIB_BUF_FULL);
+
+  tt_int_op(r, OP_EQ, TOR_ZLIB_ERR);
+
+ done:
+  tor_free(one_mb);
+  tor_zlib_free(state);
 }
 
 /** Run unit tests for mmap() wrapper functionality. */
@@ -3347,6 +3674,21 @@ test_util_ftruncate(void *ptr)
   if (fd >= 0)
     close(fd);
   tor_free(buf);
+}
+
+static void
+test_util_num_cpus(void *arg)
+{
+  (void)arg;
+  int num = compute_num_cpus();
+  if (num < 0)
+    tt_skip();
+
+  tt_int_op(num, OP_GE, 1);
+  tt_int_op(num, OP_LE, 16);
+
+ done:
+  ;
 }
 
 #ifdef _WIN32
@@ -4846,6 +5188,7 @@ test_util_pwdb(void *arg)
   const struct passwd *me = NULL, *me2, *me3;
   char *name = NULL;
   char *dir = NULL;
+  int prev_level = -100;
 
   /* Uncached case. */
   /* Let's assume that we exist. */
@@ -4870,9 +5213,45 @@ test_util_pwdb(void *arg)
   dir = get_user_homedir(name);
   tt_assert(dir != NULL);
 
+  /* Try failing cases.  First find a user that doesn't exist by name */
+  char rand[4];
+  char badname[9];
+  int i, found=0;
+  for (i = 0; i < 100; ++i) {
+    crypto_rand(rand, sizeof(rand));
+    base16_encode(badname, sizeof(badname), rand, sizeof(rand));
+    if (tor_getpwnam(badname) == NULL) {
+      found = 1;
+      break;
+    }
+  }
+  tt_assert(found);
+  tor_free(dir);
+
+  prev_level = setup_capture_of_logs(LOG_ERR); /* We should do a LOG_ERR */
+  dir = get_user_homedir(badname);
+  tt_assert(dir == NULL);
+  tt_int_op(smartlist_len(mock_saved_logs()), OP_EQ, 1);
+  teardown_capture_of_logs(prev_level);
+  prev_level = -100;
+
+  /* Now try to find a user that doesn't exist by ID. */
+  found = 0;
+  for (i = 0; i < 1000; ++i) {
+    uid_t u;
+    crypto_rand((char*)&u, sizeof(u));
+    if (tor_getpwuid(u) == NULL) {
+      found = 1;
+      break;
+    }
+  }
+  tt_assert(found);
+
  done:
   tor_free(name);
   tor_free(dir);
+  if (prev_level >= 0)
+    teardown_capture_of_logs(prev_level);
 }
 #endif
 
@@ -4935,6 +5314,7 @@ struct testcase_t util_tests[] = {
   UTIL_LEGACY(strmisc),
   UTIL_LEGACY(pow2),
   UTIL_LEGACY(gzip),
+  UTIL_LEGACY(gzip_compression_bomb),
   UTIL_LEGACY(datadir),
   UTIL_LEGACY(memarea),
   UTIL_LEGACY(control_formats),
@@ -4954,6 +5334,7 @@ struct testcase_t util_tests[] = {
   UTIL_TEST(listdir, 0),
   UTIL_TEST(parent_dir, 0),
   UTIL_TEST(ftruncate, 0),
+  UTIL_TEST(num_cpus, 0),
   UTIL_TEST_WIN_ONLY(load_win_lib, 0),
   UTIL_TEST_NO_WIN(exit_status, 0),
   UTIL_TEST_NO_WIN(fgets_eagain, 0),

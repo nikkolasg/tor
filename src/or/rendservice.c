@@ -926,7 +926,6 @@ rend_service_del_ephemeral(const char *service_id)
    */
   SMARTLIST_FOREACH_BEGIN(circuit_get_global_list(), circuit_t *, circ) {
     if (!circ->marked_for_close &&
-        circ->state == CIRCUIT_STATE_OPEN &&
         (circ->purpose == CIRCUIT_PURPOSE_S_ESTABLISH_INTRO ||
          circ->purpose == CIRCUIT_PURPOSE_S_INTRO)) {
       origin_circuit_t *oc = TO_ORIGIN_CIRCUIT(circ);
@@ -3461,8 +3460,6 @@ rend_service_desc_has_uploaded(const rend_data_t *rend_data)
 
   service = rend_service_get_by_service_id(rend_data->onion_address);
   if (service == NULL) {
-    log_warn(LD_REND, "Service %s not found after descriptor upload",
-             safe_str_client(rend_data->onion_address));
     return;
   }
 

@@ -1408,7 +1408,11 @@ class CandidateList(dict):
   def calculate_measured_bandwidth(self):
     self.sort_fallbacks_by_cw_to_bw_factor()
     median_fallback = self.fallback_median(True)
-    median_cw_to_bw_factor = median_fallback.cw_to_bw_factor()
+    if median_fallback is not None:
+      median_cw_to_bw_factor = median_fallback.cw_to_bw_factor()
+    else:
+      # this will never be used, because there are no fallbacks
+      median_cw_to_bw_factor = None
     for f in self.fallbacks:
       f.set_measured_bandwidth(median_cw_to_bw_factor)
 
@@ -1593,7 +1597,11 @@ class CandidateList(dict):
   # return a string that describes a/b as a percentage
   @staticmethod
   def describe_percentage(a, b):
-    return '%d/%d = %.0f%%'%(a, b, (a*100.0)/b)
+    if b != 0:
+      return '%d/%d = %.0f%%'%(a, b, (a*100.0)/b)
+    else:
+      # technically, 0/0 is undefined, but 0.0% is a sensible result
+      return '%d/%d = %.0f%%'%(a, b, 0.0)
 
   # return a dictionary of lists of fallbacks by IPv4 netblock
   # the dictionary is keyed by the fingerprint of an arbitrary fallback
@@ -1820,20 +1828,25 @@ class CandidateList(dict):
 
   def summarise_fallbacks(self, eligible_count, operator_count, failed_count,
                           guard_count, target_count):
+    s = ''
+    s += '/* To comment-out entries in this file, use C comments, and add *'
+    s += ' to the start of each line. (stem finds fallback entries using "'
+    s += ' at the start of a line.) */'
+    s += '\n'
     # Report:
     #  whether we checked consensus download times
     #  the number of fallback directories (and limits/exclusions, if relevant)
     #  min & max fallback bandwidths
     #  #error if below minimum count
     if PERFORM_IPV4_DIRPORT_CHECKS or PERFORM_IPV6_DIRPORT_CHECKS:
-      s = '/* Checked %s%s%s DirPorts served a consensus within %.1fs. */'%(
+      s += '/* Checked %s%s%s DirPorts served a consensus within %.1fs. */'%(
             'IPv4' if PERFORM_IPV4_DIRPORT_CHECKS else '',
             ' and ' if (PERFORM_IPV4_DIRPORT_CHECKS
                         and PERFORM_IPV6_DIRPORT_CHECKS) else '',
             'IPv6' if PERFORM_IPV6_DIRPORT_CHECKS else '',
             CONSENSUS_DOWNLOAD_SPEED_MAX)
     else:
-      s = '/* Did not check IPv4 or IPv6 DirPort consensus downloads. */'
+      s += '/* Did not check IPv4 or IPv6 DirPort consensus downloads. */'
     s += '\n'
     # Multiline C comment with #error if things go bad
     s += '/*'
@@ -1909,6 +1922,10 @@ def list_fallbacks():
   prefilter_fallbacks = copy.copy(candidates.fallbacks)
 
   # filter with the whitelist and blacklist
+  # if a relay has changed IPv4 address or ports recently, it will be excluded
+  # as ineligible before we call apply_filter_lists, and so there will be no
+  # warning that the details have changed from those in the whitelist.
+  # instead, there will be an info-level log during the eligibility check.
   initial_count = len(candidates.fallbacks)
   excluded_count = candidates.apply_filter_lists()
   print candidates.summarise_filters(initial_count, excluded_count)

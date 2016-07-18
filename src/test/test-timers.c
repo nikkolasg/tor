@@ -7,11 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#ifdef HAVE_EVENT2_EVENT_H
 #include <event2/event.h>
-#else
-#include <event.h>
-#endif
 
 #include "compat.h"
 #include "compat_libevent.h"
@@ -97,8 +93,8 @@ main(int argc, char **argv)
     total_square_difference += diff*diff;
   }
   const int64_t mean_diff = total_difference / n_active_timers;
-  printf("mean difference: "U64_FORMAT" usec\n",
-         U64_PRINTF_ARG(mean_diff));
+  printf("mean difference: "I64_FORMAT" usec\n",
+         I64_PRINTF_ARG(mean_diff));
 
   const double mean_sq = ((double)total_square_difference)/ n_active_timers;
   const double sq_mean = mean_diff * mean_diff;

@@ -122,7 +122,8 @@ add_fingerprint_to_dir(const char *fp, authdir_config_t *list,
 
   fingerprint = tor_strdup(fp);
   tor_strstrip(fingerprint, " ");
-  if (base16_decode(d, DIGEST_LEN, fingerprint, strlen(fingerprint))) {
+  if (base16_decode(d, DIGEST_LEN,
+                    fingerprint, strlen(fingerprint)) != DIGEST_LEN) {
     log_warn(LD_DIRSERV, "Couldn't decode fingerprint \"%s\"",
              escaped(fp));
     tor_free(fingerprint);
@@ -199,7 +200,7 @@ dirserv_load_fingerprint_file(void)
     tor_strstrip(fingerprint, " "); /* remove spaces */
     if (strlen(fingerprint) != HEX_DIGEST_LEN ||
         base16_decode(digest_tmp, sizeof(digest_tmp),
-                      fingerprint, HEX_DIGEST_LEN) < 0) {
+                      fingerprint, HEX_DIGEST_LEN) != sizeof(digest_tmp)) {
       log_notice(LD_CONFIG,
                  "Invalid fingerprint (nickname '%s', "
                  "fingerprint %s). Skipping.",
@@ -2061,8 +2062,8 @@ routers_make_ed_keys_unique(smartlist_t *routers)
       const time_t ri2_pub = ri2->cache_info.published_on;
       if (ri2_pub < ri_pub ||
           (ri2_pub == ri_pub &&
-           memcmp(ri->cache_info.signed_descriptor_digest,
-                  ri2->cache_info.signed_descriptor_digest,DIGEST_LEN)<0)) {
+           fast_memcmp(ri->cache_info.signed_descriptor_digest,
+                     ri2->cache_info.signed_descriptor_digest,DIGEST_LEN)<0)) {
         digest256map_set(by_ed_key, pk, ri);
         ri2->omit_from_vote = 1;
       } else {
@@ -2274,7 +2275,8 @@ guardfraction_file_parse_guard_line(const char *guard_line,
 
   inputs_tmp = smartlist_get(sl, 0);
   if (strlen(inputs_tmp) != HEX_DIGEST_LEN ||
-      base16_decode(guard_id, DIGEST_LEN, inputs_tmp, HEX_DIGEST_LEN)) {
+      base16_decode(guard_id, DIGEST_LEN,
+                    inputs_tmp, HEX_DIGEST_LEN) != DIGEST_LEN) {
     tor_asprintf(err_msg, "bad digest '%s'", inputs_tmp);
     goto done;
   }
@@ -2578,7 +2580,8 @@ measured_bw_line_parse(measured_bw_line_t *out, const char *orig_line)
       cp+=strlen("node_id=$");
 
       if (strlen(cp) != HEX_DIGEST_LEN ||
-          base16_decode(out->node_id, DIGEST_LEN, cp, HEX_DIGEST_LEN)) {
+          base16_decode(out->node_id, DIGEST_LEN,
+                        cp, HEX_DIGEST_LEN) != DIGEST_LEN) {
         log_warn(LD_DIRSERV, "Invalid node_id in bandwidth file line: %s",
                  escaped(orig_line));
         tor_free(line);

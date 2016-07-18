@@ -52,7 +52,8 @@ dir_server_t *router_get_trusteddirserver_by_digest(const char *d);
 dir_server_t *router_get_fallback_dirserver_by_digest(
                                                    const char *digest);
 int router_digest_is_fallback_dir(const char *digest);
-dir_server_t *trusteddirserver_get_by_v3_auth_digest(const char *d);
+MOCK_DECL(dir_server_t *, trusteddirserver_get_by_v3_auth_digest,
+          (const char *d));
 const routerstatus_t *router_pick_trusteddirserver(dirinfo_type_t type,
                                                    int flags);
 const routerstatus_t *router_pick_fallback_dirserver(dirinfo_type_t type,
@@ -103,6 +104,14 @@ void routerlist_remove(routerlist_t *rl, routerinfo_t *ri, int make_old,
                        time_t now);
 void routerlist_free_all(void);
 void routerlist_reset_warnings(void);
+
+MOCK_DECL(smartlist_t *, list_authority_ids_with_downloads, (void));
+MOCK_DECL(download_status_t *, id_only_download_status_for_authority_id,
+          (const char *digest));
+MOCK_DECL(smartlist_t *, list_sk_digests_for_authority_id,
+          (const char *digest));
+MOCK_DECL(download_status_t *, download_status_for_authority_id_and_sk,
+    (const char *id_digest, const char *sk_digest));
 
 static int WRA_WAS_ADDED(was_router_added_t s);
 static int WRA_WAS_OUTDATED(was_router_added_t s);

@@ -131,7 +131,7 @@ base32_decode(char *dest, size_t destlen, const char *src, size_t srclen)
 #define BASE64_OPENSSL_LINELEN 64
 /**
  * Return the adjusted encoded size according to the flags.
- * The enclen represents the length of the encoded input size 
+ * The enclen represents the length of the encoded input size
  * computed in base64_encode_size{_nopad}.
  * If <b>flags</b>&amp;BASE64_ENCODE_MULTILINE is true, return the size
  * of the encoded output as multiline output (64 character, `\n' terminated
@@ -147,9 +147,8 @@ base64_encode_size_flags(size_t enclen, int flags)
   enclen += enclen / BASE64_OPENSSL_LINELEN;
   if (remainder)
     enclen++;
-  return enclen; 
+  return enclen;
 }
-
 
 /** Return the Base64 encoded size of <b>srclen</b> bytes of data in
  * bytes.

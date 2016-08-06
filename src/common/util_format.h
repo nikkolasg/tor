@@ -15,6 +15,7 @@ size_t base64_encode_size(size_t srclen, int flags);
 int base64_encode(char *dest, size_t destlen, const char *src, size_t srclen,
                   int flags);
 int base64_decode(char *dest, size_t destlen, const char *src, size_t srclen);
+size_t base64_encode_size_nopad(size_t srclen, int flags);
 int base64_encode_nopad(char *dest, size_t destlen,
                         const uint8_t *src, size_t srclen);
 int base64_decode_nopad(uint8_t *dest, size_t destlen,

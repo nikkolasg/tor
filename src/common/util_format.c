@@ -129,6 +129,27 @@ base32_decode(char *dest, size_t destlen, const char *src, size_t srclen)
 }
 
 #define BASE64_OPENSSL_LINELEN 64
+/**
+ * Return the adjusted encoded size according to the flags.
+ * The enclen represents the length of the encoded input size 
+ * computed in base64_encode_size{_nopad}.
+ * If <b>flags</b>&amp;BASE64_ENCODE_MULTILINE is true, return the size
+ * of the encoded output as multiline output (64 character, `\n' terminated
+ * lines).
+ */
+static size_t
+base64_encode_size_flags(size_t enclen, int flags)
+{
+  if ((flags & BASE64_ENCODE_MULTILINE) == 0)
+      return enclen;
+
+  size_t remainder = enclen % BASE64_OPENSSL_LINELEN;
+  enclen += enclen / BASE64_OPENSSL_LINELEN;
+  if (remainder)
+    enclen++;
+  return enclen; 
+}
+
 
 /** Return the Base64 encoded size of <b>srclen</b> bytes of data in
  * bytes.
@@ -147,12 +168,43 @@ base64_encode_size(size_t srclen, int flags)
     return 0;
 
   enclen = ((srclen - 1) / 3) * 4 + 4;
-  if (flags & BASE64_ENCODE_MULTILINE) {
-    size_t remainder = enclen % BASE64_OPENSSL_LINELEN;
-    enclen += enclen / BASE64_OPENSSL_LINELEN;
-    if (remainder)
-      enclen++;
+  // check the flags
+  enclen = base64_encode_size_flags(enclen,flags);
+
+  tor_assert(enclen < INT_MAX && enclen > srclen);
+  return enclen;
+}
+
+/** Return the Base64 encoded size of <b>srclen</b> bytes of data in
+ * bytes.
+ *
+ * If <b>flags</b>&amp;BASE64_ENCODE_MULTILINE is true, return the size
+ * of the encoded output as multiline output (64 character, `\n' terminated
+ * lines).
+ */
+size_t
+base64_encode_size_nopad(size_t srclen, int flags)
+{
+  size_t enclen;
+  tor_assert(srclen < INT_MAX);
+
+  if (srclen == 0)
+    return 0;
+
+  enclen = (srclen / 3) * 4;
+  size_t rem = srclen % 3;
+  switch (rem) {
+      case 1:
+          enclen += 2;
+          break;
+      case 2:
+          enclen += 3;
+          break;
+      /* if rem == 0, we are all good */
   }
+  // check the flags
+  enclen = base64_encode_size_flags(enclen,flags);
+
   tor_assert(enclen < INT_MAX && enclen > srclen);
   return enclen;
 }

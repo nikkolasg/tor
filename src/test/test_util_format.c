@@ -50,6 +50,48 @@ test_util_format_unaligned_accessors(void *ignored)
 }
 
 static void
+test_util_format_base64_encode_size(void *ignored)
+{
+    (void)ignored;
+    size_t dst_len;
+    int t1 = 37;
+    int t2 = 131;
+
+    dst_len = base64_encode_size(t1,0);
+    tt_int_op(dst_len,OP_EQ,52);
+   
+    dst_len = base64_encode_size(t2,0); 
+    tt_int_op(dst_len,OP_EQ,176);
+    
+    dst_len = base64_encode_size(t2,BASE64_ENCODE_MULTILINE);
+    tt_int_op(dst_len,OP_EQ,179);
+done:
+    ;
+}
+
+static void
+test_util_format_base64_encode_size_nopad(void *ignored)
+{
+    (void)ignored;
+    size_t dst_len;
+    int t1 = 37;
+    int t2 = 131;
+
+    dst_len = base64_encode_size_nopad(t1,0);
+    tt_int_op(dst_len,OP_EQ,50);
+    
+    dst_len = base64_encode_size_nopad(t2,0);
+    tt_int_op(dst_len,OP_EQ,175);
+    
+    dst_len = base64_encode_size_nopad(t2,BASE64_ENCODE_MULTILINE);
+    tt_int_op(dst_len,OP_EQ,178);
+done:
+    ;
+}
+
+
+
+static void
 test_util_format_base64_encode(void *ignored)
 {
   (void)ignored;
@@ -391,6 +433,8 @@ test_util_format_base32_decode(void *arg)
 struct testcase_t util_format_tests[] = {
   { "unaligned_accessors", test_util_format_unaligned_accessors, 0,
     NULL, NULL },
+  { "base64_encode_size", test_util_format_base64_encode_size, 0, NULL, NULL },
+  { "base64_encode_size_nopad", test_util_format_base64_encode_size_nopad, 0, NULL, NULL },
   { "base64_encode", test_util_format_base64_encode, 0, NULL, NULL },
   { "base64_decode_nopad", test_util_format_base64_decode_nopad, 0,
     NULL, NULL },

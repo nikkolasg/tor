@@ -255,12 +255,12 @@ circuit_receive_relay_cell(cell_t *cell, circuit_t *circ,
     if (! CIRCUIT_IS_ORIGIN(circ) &&
         TO_OR_CIRCUIT(circ)->rend_splice &&
         cell_direction == CELL_DIRECTION_OUT) {
-      or_circuit_t *splice = TO_OR_CIRCUIT(circ)->rend_splice;
+      or_circuit_t *splice_ = TO_OR_CIRCUIT(circ)->rend_splice;
       tor_assert(circ->purpose == CIRCUIT_PURPOSE_REND_ESTABLISHED);
-      tor_assert(splice->base_.purpose == CIRCUIT_PURPOSE_REND_ESTABLISHED);
-      cell->circ_id = splice->p_circ_id;
+      tor_assert(splice_->base_.purpose == CIRCUIT_PURPOSE_REND_ESTABLISHED);
+      cell->circ_id = splice_->p_circ_id;
       cell->command = CELL_RELAY; /* can't be relay_early anyway */
-      if ((reason = circuit_receive_relay_cell(cell, TO_CIRCUIT(splice),
+      if ((reason = circuit_receive_relay_cell(cell, TO_CIRCUIT(splice_),
                                                CELL_DIRECTION_IN)) < 0) {
         log_warn(LD_REND, "Error relaying cell across rendezvous; closing "
                  "circuits");
@@ -2320,14 +2320,12 @@ cell_queue_append_packed_copy(circuit_t *circ, cell_queue_t *queue,
                               int exitward, const cell_t *cell,
                               int wide_circ_ids, int use_stats)
 {
-  struct timeval now;
   packed_cell_t *copy = packed_cell_copy(cell, wide_circ_ids);
   (void)circ;
   (void)exitward;
   (void)use_stats;
-  tor_gettimeofday_cached_monotonic(&now);
 
-  copy->inserted_time = (uint32_t)tv_to_msec(&now);
+  copy->inserted_time = (uint32_t) monotime_coarse_absolute_msec();
 
   cell_queue_append(queue, copy);
 }
@@ -2628,9 +2626,8 @@ channel_flush_from_first_active_circuit, (channel_t *chan, int max))
     if (get_options()->CellStatistics ||
         get_options()->TestingEnableCellStatsEvent) {
       uint32_t msec_waiting;
-      struct timeval tvnow;
-      tor_gettimeofday_cached(&tvnow);
-      msec_waiting = ((uint32_t)tv_to_msec(&tvnow)) - cell->inserted_time;
+      uint32_t msec_now = (uint32_t)monotime_coarse_absolute_msec();
+      msec_waiting = msec_now - cell->inserted_time;
 
       if (get_options()->CellStatistics && !CIRCUIT_IS_ORIGIN(circ)) {
         or_circ = TO_OR_CIRCUIT(circ);

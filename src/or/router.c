@@ -1284,14 +1284,16 @@ decide_to_advertise_begindir(const or_options_t *options,
 }
 
 /** Allocate and return a new extend_info_t that can be used to build
- * a circuit to or through the router <b>r</b>. Use the primary
- * address of the router unless <b>for_direct_connect</b> is true, in
- * which case the preferred address is used instead. */
+ * a circuit to or through the router <b>r</b>. Uses the primary
+ * address of the router, so should only be called on a server. */
 static extend_info_t *
 extend_info_from_router(const routerinfo_t *r)
 {
   tor_addr_port_t ap;
   tor_assert(r);
+
+  /* Make sure we don't need to check address reachability */
+  tor_assert_nonfatal(router_skip_or_reachability(get_options(), 0));
 
   router_get_prim_orport(r, &ap);
   return extend_info_new(r->nickname, r->cache_info.identity_digest,
@@ -3077,17 +3079,17 @@ extrainfo_dump_to_string(char **s_out, extrainfo_t *extrainfo,
   }
 
   if (emit_ed_sigs) {
-    char digest[DIGEST256_LEN];
+    char sha256_digest[DIGEST256_LEN];
     smartlist_add(chunks, tor_strdup("router-sig-ed25519 "));
-    crypto_digest_smartlist_prefix(digest, DIGEST256_LEN,
+    crypto_digest_smartlist_prefix(sha256_digest, DIGEST256_LEN,
                                    ED_DESC_SIGNATURE_PREFIX,
                                    chunks, "", DIGEST_SHA256);
-    ed25519_signature_t sig;
+    ed25519_signature_t ed_sig;
     char buf[ED25519_SIG_BASE64_LEN+1];
-    if (ed25519_sign(&sig, (const uint8_t*)digest, DIGEST256_LEN,
+    if (ed25519_sign(&ed_sig, (const uint8_t*)sha256_digest, DIGEST256_LEN,
                      signing_keypair) < 0)
       goto err;
-    if (ed25519_signature_to_base64(buf, &sig) < 0)
+    if (ed25519_signature_to_base64(buf, &ed_sig) < 0)
       goto err;
 
     smartlist_add_asprintf(chunks, "%s\n", buf);
@@ -3161,7 +3163,7 @@ extrainfo_dump_to_string(char **s_out, extrainfo_t *extrainfo,
 
  done:
   tor_free(s);
-  SMARTLIST_FOREACH(chunks, char *, cp, tor_free(cp));
+  SMARTLIST_FOREACH(chunks, char *, chunk, tor_free(chunk));
   smartlist_free(chunks);
   tor_free(s_dup);
   tor_free(ed_cert_line);

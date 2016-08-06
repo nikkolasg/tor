@@ -917,7 +917,6 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now,
    */
   digestmap_t *pending_id;
   fp_pair_map_t *pending_cert;
-  authority_cert_t *cert;
   /*
    * The missing_id_digests smartlist will hold a list of id digests
    * we want to fetch the newest cert for; the missing_cert_digests
@@ -1027,8 +1026,9 @@ authority_certs_fetch_missing(networkstatus_t *status, time_t now,
       }
 
       SMARTLIST_FOREACH_BEGIN(voter->sigs, document_signature_t *, sig) {
-        cert = authority_cert_get_by_digests(voter->identity_digest,
-                                             sig->signing_key_digest);
+        authority_cert_t *cert =
+          authority_cert_get_by_digests(voter->identity_digest,
+                                        sig->signing_key_digest);
         if (cert) {
           if (now < cert->expires)
             download_status_reset_by_sk_in_cl(cl, sig->signing_key_digest);
@@ -1870,7 +1870,7 @@ router_picked_poor_directory_log(const routerstatus_t *rs)
 /* When iterating through the routerlist, can OR address/port preference
  * and reachability checks be skipped?
  */
-static int
+int
 router_skip_or_reachability(const or_options_t *options, int try_ip_pref)
 {
   /* Servers always have and prefer IPv4.

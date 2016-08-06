@@ -33,6 +33,12 @@
 #ifdef HAVE_SYS_STAT_H
 #include <sys/stat.h>
 #endif
+#ifdef HAVE_UTIME_H
+#include <utime.h>
+#endif
+#ifdef HAVE_SYS_UTIME_H
+#include <sys/utime.h>
+#endif
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
 #endif
@@ -89,12 +95,6 @@ SecureZeroMemory(PVOID ptr, SIZE_T cnt)
 #include "tor_readpassphrase.h"
 #endif
 
-#ifndef HAVE_GETTIMEOFDAY
-#ifdef HAVE_FTIME
-#include <sys/timeb.h>
-#endif
-#endif
-
 /* Includes for the process attaching prevention */
 #if defined(HAVE_SYS_PRCTL_H) && defined(__linux__)
 /* Only use the linux prctl;  the IRIX prctl is totally different */
@@ -116,12 +116,6 @@ SecureZeroMemory(PVOID ptr, SIZE_T cnt)
 #ifdef HAVE_SIGNAL_H
 #include <signal.h>
 #endif
-#ifdef HAVE_UTIME_H
-#include <utime.h>
-#endif
-#ifdef HAVE_SYS_UTIME_H
-#include <sys/utime.h>
-#endif
 #ifdef HAVE_SYS_MMAN_H
 #include <sys/mman.h>
 #endif
@@ -130,12 +124,6 @@ SecureZeroMemory(PVOID ptr, SIZE_T cnt)
 #endif
 #ifdef HAVE_SYS_FILE_H
 #include <sys/file.h>
-#endif
-#ifdef TOR_UNIT_TESTS
-#if !defined(HAVE_USLEEP) && defined(HAVE_SYS_SELECT_H)
-/* as fallback implementation for tor_sleep_msec */
-#include <sys/select.h>
-#endif
 #endif
 
 #include "torlog.h"
@@ -1193,10 +1181,10 @@ tor_open_socket,(int domain, int type, int protocol))
 
 /** Mockable wrapper for connect(). */
 MOCK_IMPL(tor_socket_t,
-tor_connect_socket,(tor_socket_t socket,const struct sockaddr *address,
+tor_connect_socket,(tor_socket_t sock, const struct sockaddr *address,
                      socklen_t address_len))
 {
-  return connect(socket,address,address_len);
+  return connect(sock,address,address_len);
 }
 
 /** As socket(), but creates a nonblocking socket and
@@ -1371,31 +1359,31 @@ get_n_open_sockets(void)
 
 /** Mockable wrapper for getsockname(). */
 MOCK_IMPL(int,
-tor_getsockname,(tor_socket_t socket, struct sockaddr *address,
+tor_getsockname,(tor_socket_t sock, struct sockaddr *address,
                  socklen_t *address_len))
 {
-   return getsockname(socket, address, address_len);
+   return getsockname(sock, address, address_len);
 }
 
 /** Turn <b>socket</b> into a nonblocking socket. Return 0 on success, -1
  * on failure.
  */
 int
-set_socket_nonblocking(tor_socket_t socket)
+set_socket_nonblocking(tor_socket_t sock)
 {
 #if defined(_WIN32)
   unsigned long nonblocking = 1;
-  ioctlsocket(socket, FIONBIO, (unsigned long*) &nonblocking);
+  ioctlsocket(sock, FIONBIO, (unsigned long*) &nonblocking);
 #else
   int flags;
 
-  flags = fcntl(socket, F_GETFL, 0);
+  flags = fcntl(sock, F_GETFL, 0);
   if (flags == -1) {
     log_warn(LD_NET, "Couldn't get file status flags: %s", strerror(errno));
     return -1;
   }
   flags |= O_NONBLOCK;
-  if (fcntl(socket, F_SETFL, flags) == -1) {
+  if (fcntl(sock, F_SETFL, flags) == -1) {
     log_warn(LD_NET, "Couldn't set file status flags: %s", strerror(errno));
     return -1;
   }
@@ -2836,54 +2824,6 @@ compute_num_cpus(void)
   return num_cpus;
 }
 
-/** Set *timeval to the current time of day.  On error, log and terminate.
- * (Same as gettimeofday(timeval,NULL), but never returns -1.)
- */
-void
-tor_gettimeofday(struct timeval *timeval)
-{
-#ifdef _WIN32
-  /* Epoch bias copied from perl: number of units between windows epoch and
-   * Unix epoch. */
-#define EPOCH_BIAS U64_LITERAL(116444736000000000)
-#define UNITS_PER_SEC U64_LITERAL(10000000)
-#define USEC_PER_SEC U64_LITERAL(1000000)
-#define UNITS_PER_USEC U64_LITERAL(10)
-  union {
-    uint64_t ft_64;
-    FILETIME ft_ft;
-  } ft;
-  /* number of 100-nsec units since Jan 1, 1601 */
-  GetSystemTimeAsFileTime(&ft.ft_ft);
-  if (ft.ft_64 < EPOCH_BIAS) {
-    /* LCOV_EXCL_START */
-    log_err(LD_GENERAL,"System time is before 1970; failing.");
-    exit(1);
-    /* LCOV_EXCL_STOP */
-  }
-  ft.ft_64 -= EPOCH_BIAS;
-  timeval->tv_sec = (unsigned) (ft.ft_64 / UNITS_PER_SEC);
-  timeval->tv_usec = (unsigned) ((ft.ft_64 / UNITS_PER_USEC) % USEC_PER_SEC);
-#elif defined(HAVE_GETTIMEOFDAY)
-  if (gettimeofday(timeval, NULL)) {
-    /* LCOV_EXCL_START */
-    log_err(LD_GENERAL,"gettimeofday failed.");
-    /* If gettimeofday dies, we have either given a bad timezone (we didn't),
-       or segfaulted.*/
-    exit(1);
-    /* LCOV_EXCL_STOP */
-  }
-#elif defined(HAVE_FTIME)
-  struct timeb tb;
-  ftime(&tb);
-  timeval->tv_sec = tb.time;
-  timeval->tv_usec = tb.millitm * 1000;
-#else
-#error "No way to get time."
-#endif
-  return;
-}
-
 #if !defined(_WIN32)
 /** Defined iff we need to add locks when defining fake versions of reentrant
  * versions of time-related functions. */
@@ -3440,26 +3380,6 @@ get_total_system_memory(size_t *mem_out)
 
   return 0;
 }
-
-#ifdef TOR_UNIT_TESTS
-/** Delay for <b>msec</b> milliseconds.  Only used in tests. */
-void
-tor_sleep_msec(int msec)
-{
-#ifdef _WIN32
-  Sleep(msec);
-#elif defined(HAVE_USLEEP)
-  sleep(msec / 1000);
-  /* Some usleep()s hate sleeping more than 1 sec */
-  usleep((msec % 1000) * 1000);
-#elif defined(HAVE_SYS_SELECT_H)
-  struct timeval tv = { msec / 1000, (msec % 1000) * 1000};
-  select(0, NULL, NULL, NULL, &tv);
-#else
-  sleep(CEIL_DIV(msec, 1000));
-#endif
-}
-#endif
 
 /** Emit the password prompt <b>prompt</b>, then read up to <b>buflen</b>
  * bytes of passphrase into <b>output</b>. Return the number of bytes in

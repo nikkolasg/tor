@@ -743,14 +743,15 @@ rep_history_clean(time_t before)
 
   orhist_it = digestmap_iter_init(history_map);
   while (!digestmap_iter_done(orhist_it)) {
-    int remove;
+    int should_remove;
     digestmap_iter_get(orhist_it, &d1, &or_history_p);
     or_history = or_history_p;
 
-    remove = authority ? (or_history->total_run_weights < STABILITY_EPSILON &&
+    should_remove = authority ?
+                       (or_history->total_run_weights < STABILITY_EPSILON &&
                           !or_history->start_of_run)
                        : (or_history->changed < before);
-    if (remove) {
+    if (should_remove) {
       orhist_it = digestmap_iter_next_rmv(history_map, orhist_it);
       free_or_history(or_history);
       continue;
@@ -2294,16 +2295,16 @@ void
 rep_hist_add_buffer_stats(double mean_num_cells_in_queue,
     double mean_time_cells_in_queue, uint32_t processed_cells)
 {
-  circ_buffer_stats_t *stat;
+  circ_buffer_stats_t *stats;
   if (!start_of_buffer_stats_interval)
     return; /* Not initialized. */
-  stat = tor_malloc_zero(sizeof(circ_buffer_stats_t));
-  stat->mean_num_cells_in_queue = mean_num_cells_in_queue;
-  stat->mean_time_cells_in_queue = mean_time_cells_in_queue;
-  stat->processed_cells = processed_cells;
+  stats = tor_malloc_zero(sizeof(circ_buffer_stats_t));
+  stats->mean_num_cells_in_queue = mean_num_cells_in_queue;
+  stats->mean_time_cells_in_queue = mean_time_cells_in_queue;
+  stats->processed_cells = processed_cells;
   if (!circuits_for_buffer_stats)
     circuits_for_buffer_stats = smartlist_new();
-  smartlist_add(circuits_for_buffer_stats, stat);
+  smartlist_add(circuits_for_buffer_stats, stats);
 }
 
 /** Remember cell statistics for circuit <b>circ</b> at time
@@ -2373,7 +2374,7 @@ rep_hist_reset_buffer_stats(time_t now)
   if (!circuits_for_buffer_stats)
     circuits_for_buffer_stats = smartlist_new();
   SMARTLIST_FOREACH(circuits_for_buffer_stats, circ_buffer_stats_t *,
-      stat, tor_free(stat));
+      stats, tor_free(stats));
   smartlist_clear(circuits_for_buffer_stats);
   start_of_buffer_stats_interval = now;
 }
@@ -2414,15 +2415,15 @@ rep_hist_format_buffer_stats(time_t now)
                    buffer_stats_compare_entries_);
     i = 0;
     SMARTLIST_FOREACH_BEGIN(circuits_for_buffer_stats,
-                            circ_buffer_stats_t *, stat)
+                            circ_buffer_stats_t *, stats)
     {
       int share = i++ * SHARES / number_of_circuits;
-      processed_cells[share] += stat->processed_cells;
-      queued_cells[share] += stat->mean_num_cells_in_queue;
-      time_in_queue[share] += stat->mean_time_cells_in_queue;
+      processed_cells[share] += stats->processed_cells;
+      queued_cells[share] += stats->mean_num_cells_in_queue;
+      time_in_queue[share] += stats->mean_time_cells_in_queue;
       circs_in_share[share]++;
     }
-    SMARTLIST_FOREACH_END(stat);
+    SMARTLIST_FOREACH_END(stats);
   }
 
   /* Write deciles to strings. */
@@ -2948,22 +2949,22 @@ static hs_stats_t *hs_stats = NULL;
 static hs_stats_t *
 hs_stats_new(void)
 {
-  hs_stats_t * hs_stats = tor_malloc_zero(sizeof(hs_stats_t));
-  hs_stats->onions_seen_this_period = digestmap_new();
+  hs_stats_t *new_hs_stats = tor_malloc_zero(sizeof(hs_stats_t));
+  new_hs_stats->onions_seen_this_period = digestmap_new();
 
-  return hs_stats;
+  return new_hs_stats;
 }
 
 /** Free an hs_stats_t structure. */
 static void
-hs_stats_free(hs_stats_t *hs_stats)
+hs_stats_free(hs_stats_t *victim_hs_stats)
 {
-  if (!hs_stats) {
+  if (!victim_hs_stats) {
     return;
   }
 
-  digestmap_free(hs_stats->onions_seen_this_period, NULL);
-  tor_free(hs_stats);
+  digestmap_free(victim_hs_stats->onions_seen_this_period, NULL);
+  tor_free(victim_hs_stats);
 }
 
 /** Initialize hidden service statistics. */

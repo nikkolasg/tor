@@ -152,6 +152,7 @@ int64_t add_laplace_noise(int64_t signal, double random, double delta_f,
                           double epsilon);
 int n_bits_set_u8(uint8_t v);
 int64_t clamp_double_to_int64(double number);
+void simplify_fraction64(uint64_t *numer, uint64_t *denom);
 
 /* Compute the CEIL of <b>a</b> divided by <b>b</b>, for nonnegative <b>a</b>
  * and positive <b>b</b>.  Works on integer types only. Not defined if a+b can
@@ -292,6 +293,7 @@ typedef struct ratelim_t {
 } ratelim_t;
 
 #define RATELIM_INIT(r) { (r), 0, 0 }
+#define RATELIM_TOOMANY (16*1000*1000)
 
 char *rate_limit_log(ratelim_t *lim, time_t now);
 

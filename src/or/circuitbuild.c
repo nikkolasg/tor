@@ -457,14 +457,14 @@ origin_circuit_init(uint8_t purpose, int flags)
  * it's not open already.
  */
 origin_circuit_t *
-circuit_establish_circuit(uint8_t purpose, extend_info_t *exit, int flags)
+circuit_establish_circuit(uint8_t purpose, extend_info_t *exit_ei, int flags)
 {
   origin_circuit_t *circ;
   int err_reason = 0;
 
   circ = origin_circuit_init(purpose, flags);
 
-  if (onion_pick_cpath_exit(circ, exit) < 0 ||
+  if (onion_pick_cpath_exit(circ, exit_ei) < 0 ||
       onion_populate_cpath(circ) < 0) {
     circuit_mark_for_close(TO_CIRCUIT(circ), END_CIRC_REASON_NOPATH);
     return NULL;
@@ -1433,7 +1433,7 @@ onionskin_answer(or_circuit_t *circ,
  * to handle the desired path length, return -1.
  */
 static int
-new_route_len(uint8_t purpose, extend_info_t *exit, smartlist_t *nodes)
+new_route_len(uint8_t purpose, extend_info_t *exit_ei, smartlist_t *nodes)
 {
   int num_acceptable_routers;
   int routelen;
@@ -1441,7 +1441,7 @@ new_route_len(uint8_t purpose, extend_info_t *exit, smartlist_t *nodes)
   tor_assert(nodes);
 
   routelen = DEFAULT_ROUTE_LEN;
-  if (exit &&
+  if (exit_ei &&
       purpose != CIRCUIT_PURPOSE_TESTING &&
       purpose != CIRCUIT_PURPOSE_S_ESTABLISH_INTRO)
     routelen++;
@@ -1565,7 +1565,7 @@ choose_good_exit_server_general(int need_uptime, int need_capacity)
   int n_best_support=0;
   const or_options_t *options = get_options();
   const smartlist_t *the_nodes;
-  const node_t *node=NULL;
+  const node_t *selected_node=NULL;
 
   connections = get_connection_array();
 
@@ -1692,7 +1692,7 @@ choose_good_exit_server_general(int need_uptime, int need_capacity)
         smartlist_add(supporting, (void*)node);
     });
 
-    node = node_sl_choose_by_bandwidth(supporting, WEIGHT_FOR_EXIT);
+    selected_node = node_sl_choose_by_bandwidth(supporting, WEIGHT_FOR_EXIT);
     smartlist_free(supporting);
   } else {
     /* Either there are no pending connections, or no routers even seem to
@@ -1730,8 +1730,8 @@ choose_good_exit_server_general(int need_uptime, int need_capacity)
         }
       } SMARTLIST_FOREACH_END(node);
 
-      node = node_sl_choose_by_bandwidth(supporting, WEIGHT_FOR_EXIT);
-      if (node)
+      selected_node = node_sl_choose_by_bandwidth(supporting, WEIGHT_FOR_EXIT);
+      if (selected_node)
         break;
       smartlist_clear(supporting);
       /* If we reach this point, we can't actually support any unhandled
@@ -1745,9 +1745,9 @@ choose_good_exit_server_general(int need_uptime, int need_capacity)
   }
 
   tor_free(n_supported);
-  if (node) {
-    log_info(LD_CIRC, "Chose exit server '%s'", node_describe(node));
-    return node;
+  if (selected_node) {
+    log_info(LD_CIRC, "Chose exit server '%s'", node_describe(selected_node));
+    return selected_node;
   }
   if (options->ExitNodes) {
     log_warn(LD_CIRC,
@@ -1881,7 +1881,8 @@ choose_good_exit_server(uint8_t purpose,
 /** Log a warning if the user specified an exit for the circuit that
  * has been excluded from use by ExcludeNodes or ExcludeExitNodes. */
 static void
-warn_if_last_router_excluded(origin_circuit_t *circ, const extend_info_t *exit)
+warn_if_last_router_excluded(origin_circuit_t *circ,
+                             const extend_info_t *exit_ei)
 {
   const or_options_t *options = get_options();
   routerset_t *rs = options->ExcludeNodes;
@@ -1928,13 +1929,13 @@ warn_if_last_router_excluded(origin_circuit_t *circ, const extend_info_t *exit)
       break;
     }
 
-  if (routerset_contains_extendinfo(rs, exit)) {
+  if (routerset_contains_extendinfo(rs, exit_ei)) {
     /* We should never get here if StrictNodes is set to 1. */
     if (options->StrictNodes) {
       log_warn(LD_BUG, "Using %s '%s' which is listed in ExcludeNodes%s, "
                "even though StrictNodes is set. Please report. "
                "(Circuit purpose: %s)",
-               description, extend_info_describe(exit),
+               description, extend_info_describe(exit_ei),
                rs==options->ExcludeNodes?"":" or ExcludeExitNodes",
                circuit_purpose_to_string(purpose));
     } else {
@@ -1943,7 +1944,7 @@ warn_if_last_router_excluded(origin_circuit_t *circ, const extend_info_t *exit)
                "prevent this (and possibly break your Tor functionality), "
                "set the StrictNodes configuration option. "
                "(Circuit purpose: %s)",
-               description, extend_info_describe(exit),
+               description, extend_info_describe(exit_ei),
                rs==options->ExcludeNodes?"":" or ExcludeExitNodes",
                circuit_purpose_to_string(purpose));
     }
@@ -1957,7 +1958,7 @@ warn_if_last_router_excluded(origin_circuit_t *circ, const extend_info_t *exit)
  * router (or use <b>exit</b> if provided). Store these in the
  * cpath. Return 0 if ok, -1 if circuit should be closed. */
 static int
-onion_pick_cpath_exit(origin_circuit_t *circ, extend_info_t *exit)
+onion_pick_cpath_exit(origin_circuit_t *circ, extend_info_t *exit_ei)
 {
   cpath_build_state_t *state = circ->build_state;
 
@@ -1965,17 +1966,17 @@ onion_pick_cpath_exit(origin_circuit_t *circ, extend_info_t *exit)
     log_debug(LD_CIRC, "Launching a one-hop circuit for dir tunnel.");
     state->desired_path_len = 1;
   } else {
-    int r = new_route_len(circ->base_.purpose, exit, nodelist_get_list());
+    int r = new_route_len(circ->base_.purpose, exit_ei, nodelist_get_list());
     if (r < 1) /* must be at least 1 */
       return -1;
     state->desired_path_len = r;
   }
 
-  if (exit) { /* the circuit-builder pre-requested one */
-    warn_if_last_router_excluded(circ, exit);
+  if (exit_ei) { /* the circuit-builder pre-requested one */
+    warn_if_last_router_excluded(circ, exit_ei);
     log_info(LD_CIRC,"Using requested exit node '%s'",
-             extend_info_describe(exit));
-    exit = extend_info_dup(exit);
+             extend_info_describe(exit_ei));
+    exit_ei = extend_info_dup(exit_ei);
   } else { /* we have to decide one */
     const node_t *node =
       choose_good_exit_server(circ->base_.purpose, state->need_uptime,
@@ -1984,10 +1985,10 @@ onion_pick_cpath_exit(origin_circuit_t *circ, extend_info_t *exit)
       log_warn(LD_CIRC,"Failed to choose an exit server");
       return -1;
     }
-    exit = extend_info_from_node(node, 0);
-    tor_assert(exit);
+    exit_ei = extend_info_from_node(node, 0);
+    tor_assert(exit_ei);
   }
-  state->chosen_exit = exit;
+  state->chosen_exit = exit_ei;
   return 0;
 }
 
@@ -1996,19 +1997,19 @@ onion_pick_cpath_exit(origin_circuit_t *circ, extend_info_t *exit)
  * the caller will do this if it wants to.
  */
 int
-circuit_append_new_exit(origin_circuit_t *circ, extend_info_t *exit)
+circuit_append_new_exit(origin_circuit_t *circ, extend_info_t *exit_ei)
 {
   cpath_build_state_t *state;
-  tor_assert(exit);
+  tor_assert(exit_ei);
   tor_assert(circ);
 
   state = circ->build_state;
   tor_assert(state);
   extend_info_free(state->chosen_exit);
-  state->chosen_exit = extend_info_dup(exit);
+  state->chosen_exit = extend_info_dup(exit_ei);
 
   ++circ->build_state->desired_path_len;
-  onion_append_hop(&circ->cpath, exit);
+  onion_append_hop(&circ->cpath, exit_ei);
   return 0;
 }
 
@@ -2017,18 +2018,18 @@ circuit_append_new_exit(origin_circuit_t *circ, extend_info_t *exit)
  * send the next extend cell to begin connecting to that hop.
  */
 int
-circuit_extend_to_new_exit(origin_circuit_t *circ, extend_info_t *exit)
+circuit_extend_to_new_exit(origin_circuit_t *circ, extend_info_t *exit_ei)
 {
   int err_reason = 0;
-  warn_if_last_router_excluded(circ, exit);
+  warn_if_last_router_excluded(circ, exit_ei);
 
   tor_gettimeofday(&circ->base_.timestamp_began);
 
-  circuit_append_new_exit(circ, exit);
+  circuit_append_new_exit(circ, exit_ei);
   circuit_set_state(TO_CIRCUIT(circ), CIRCUIT_STATE_BUILDING);
   if ((err_reason = circuit_send_next_onion_skin(circ))<0) {
     log_warn(LD_CIRC, "Couldn't extend circuit to new point %s.",
-             extend_info_describe(exit));
+             extend_info_describe(exit_ei));
     circuit_mark_for_close(TO_CIRCUIT(circ), -err_reason);
     return -1;
   }

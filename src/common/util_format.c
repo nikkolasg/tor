@@ -225,7 +225,9 @@ static const char base64_encode_table[64] = {
 
 /** As base64_encode, but do not add any internal spaces or external padding
  * to the output stream. */
-int base64_encode_nopad(char *dest, size_t destlen, const uint8_t *src, size_t srclen)
+int
+base64_encode_nopad(char *dest, size_t destlen, const uint8_t *src,
+                    size_t srclen)
 {
   size_t enclen;
   int encoded;
@@ -265,8 +267,6 @@ int base64_encode_nopad(char *dest, size_t destlen, const uint8_t *src, size_t s
   return written;
 }
 
-
-
 /** Base64 encode <b>srclen</b> bytes of data from <b>src</b>.  Write
  * the result into <b>dest</b>, if it will fit within <b>destlen</b>
  * bytes. Return the number of bytes written on success; -1 if
@@ -298,8 +298,17 @@ base64_encode(char *dest, size_t destlen, const char *src, size_t srclen,
   return encoded;
 }
 
-int 
-base64_encode_internal(char *dest, size_t destlen, const char *src, size_t srclen, int flags)
+/*
+ * base64_encode_internal is an internal function that performs the encoding
+ * with a few basic checks. Its main purpose is to be used by
+ * base64_decode{_nopad} which will perform the adequate checks depending on
+ * whether or not a padding should be appended.
+ * It returns the number of bytes written WITHOUT the NUL bytes.
+ * DO NOT USE THIS FUNCTION DIRECTLY.
+ * */
+int
+base64_encode_internal(char *dest, size_t destlen, const char *src,
+                       size_t srclen, int flags)
 {
   const unsigned char *usrc = (unsigned char *)src;
   const unsigned char *eous = usrc + srclen;
@@ -397,7 +406,6 @@ base64_encode_internal(char *dest, size_t destlen, const char *src, size_t srcle
 
   return written;
 }
-
 
 /** As base64_decode, but do not require any padding on the input */
 int

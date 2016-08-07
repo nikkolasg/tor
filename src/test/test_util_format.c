@@ -58,8 +58,8 @@ test_util_format_base64_encode_size(void *ignored)
     int t2 = 131;
     int i;
     int ret;
-   
-    char *src = tor_malloc_zero(t2); 
+
+    char *src = tor_malloc_zero(t2);
     char *cpy = tor_malloc_zero(t2);
     char *dst = tor_malloc_zero(500);
 
@@ -101,7 +101,7 @@ test_util_format_base64_encode_size_nopad(void *ignored)
     int t2 = 131;
     int i;
     int ret;
-    char *src = tor_malloc_zero(t2); 
+    char *src = tor_malloc_zero(t2);
     char *cpy = tor_malloc_zero(t2);
     char *dst = tor_malloc_zero(500);
 

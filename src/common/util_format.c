@@ -153,6 +153,9 @@ base64_encode_size_flags(size_t enclen, int flags)
 /** Return the Base64 encoded size of <b>srclen</b> bytes of data in
  * bytes.
  *
+ * It does NOT include the NULL byte at the end; you must allocate a buffer
+ * of size+1 to give to base64_encode.
+ *
  * If <b>flags</b>&amp;BASE64_ENCODE_MULTILINE is true, return the size
  * of the encoded output as multiline output (64 character, `\n' terminated
  * lines).
@@ -220,6 +223,50 @@ static const char base64_encode_table[64] = {
   '4', '5', '6', '7', '8', '9', '+', '/'
 };
 
+/** As base64_encode, but do not add any internal spaces or external padding
+ * to the output stream. */
+int base64_encode_nopad(char *dest, size_t destlen, const uint8_t *src, size_t srclen)
+{
+  size_t enclen;
+  int encoded;
+  int written;
+  if (!src || !dest)
+    return -1;
+
+  /* Ensure that there is sufficient space, including the NUL. */
+  enclen = base64_encode_size_nopad(srclen, 0);
+  if (destlen < enclen + 1) {
+      return -1;
+  }
+
+  // encoded is WITH the padding
+  encoded = base64_encode_internal(dest,destlen,(char *)src,srclen,0);
+  if (encoded < 0) {
+      return encoded;
+  }
+
+  // compute without the padding
+  char *in, *out;
+  in = out = dest;
+  while (*in) {
+    if (*in == '=' || *in == '\n') {
+      ++in;
+    } else {
+      *out++ = *in++;
+    }
+  }
+  *out = 0;
+
+  tor_assert(out - dest <= INT_MAX);
+  // written the exact number of correct bytes written to the buffer
+  written  = (int) (out-dest);
+  tor_assert((size_t) written == enclen);
+  tor_assert((size_t) written < destlen && dest[written] == 0);
+  return written;
+}
+
+
+
 /** Base64 encode <b>srclen</b> bytes of data from <b>src</b>.  Write
  * the result into <b>dest</b>, if it will fit within <b>destlen</b>
  * bytes. Return the number of bytes written on success; -1 if
@@ -232,24 +279,40 @@ int
 base64_encode(char *dest, size_t destlen, const char *src, size_t srclen,
               int flags)
 {
-  const unsigned char *usrc = (unsigned char *)src;
-  const unsigned char *eous = usrc + srclen;
-  char *d = dest;
-  uint32_t n = 0;
-  size_t linelen = 0;
   size_t enclen;
-  int n_idx = 0;
-
+  int encoded;
   if (!src || !dest)
     return -1;
 
   /* Ensure that there is sufficient space, including the NUL. */
   enclen = base64_encode_size(srclen, flags);
-  if (destlen < enclen + 1)
+  if (destlen < enclen + 1) {
     return -1;
+  }
+
+  encoded = base64_encode_internal(dest,destlen,src,srclen,flags);
+  if (encoded < 0) {
+      return encoded;
+  }
+  tor_assert(encoded == (ptrdiff_t)enclen);
+  return encoded;
+}
+
+int 
+base64_encode_internal(char *dest, size_t destlen, const char *src, size_t srclen, int flags)
+{
+  const unsigned char *usrc = (unsigned char *)src;
+  const unsigned char *eous = usrc + srclen;
+  char *d = dest;
+  uint32_t n = 0;
+  size_t linelen = 0;
+  int n_idx = 0;
+  int written = 0;
+
+  if (!src || !dest)
+    return -1;
+
   if (destlen > SIZE_T_CEILING)
-    return -1;
-  if (enclen > INT_MAX)
     return -1;
 
   /* Make sure we leave no uninitialized data in the destination buffer. */
@@ -328,38 +391,13 @@ base64_encode(char *dest, size_t destlen, const char *src, size_t srclen,
   if (flags & BASE64_ENCODE_MULTILINE && linelen != 0)
     *d++ = '\n';
 
-  tor_assert(d - dest == (ptrdiff_t)enclen);
-
+  tor_assert((int)(d-dest) < INT_MAX);
+  written = (int) (d - dest);
   *d++ = '\0'; /* NUL terminate the output. */
 
-  return (int) enclen;
+  return written;
 }
 
-/** As base64_encode, but do not add any internal spaces or external padding
- * to the output stream. */
-int
-base64_encode_nopad(char *dest, size_t destlen,
-                    const uint8_t *src, size_t srclen)
-{
-  int n = base64_encode(dest, destlen, (const char*) src, srclen, 0);
-  if (n <= 0)
-    return n;
-  tor_assert((size_t)n < destlen && dest[n] == 0);
-  char *in, *out;
-  in = out = dest;
-  while (*in) {
-    if (*in == '=' || *in == '\n') {
-      ++in;
-    } else {
-      *out++ = *in++;
-    }
-  }
-  *out = 0;
-
-  tor_assert(out - dest <= INT_MAX);
-
-  return (int)(out - dest);
-}
 
 /** As base64_decode, but do not require any padding on the input */
 int

@@ -50,6 +50,90 @@ test_util_format_unaligned_accessors(void *ignored)
 }
 
 static void
+test_util_format_base64_encode_size(void *ignored)
+{
+    (void)ignored;
+    size_t dst_len;
+    int t1 = 37;
+    int t2 = 131;
+    int i;
+    int ret;
+
+    char *src = tor_malloc_zero(t2);
+    char *cpy = tor_malloc_zero(t2);
+    char *dst = tor_malloc_zero(500);
+
+    for (i=0; i<t2; i++) {
+        src[i] = (char)i;
+    }
+
+    memcpy(cpy,src,t2);
+
+    dst_len = base64_encode_size(t1,0);
+    tt_int_op(dst_len,OP_EQ,52);
+
+    dst_len = base64_encode_size(t2,0);
+    tt_int_op(dst_len,OP_EQ,176);
+
+    // +1 for the NUL byte
+    ret = base64_encode(dst,dst_len+1,src,t2,0);
+    tt_int_op(ret,OP_EQ,dst_len);
+
+    // +1 for the NUL byte
+    ret = base64_decode(src,t2+1,dst,dst_len);
+    tt_int_op(ret,OP_EQ,t2);
+    tt_str_op(src,OP_EQ,cpy);
+
+    dst_len = base64_encode_size(t2,BASE64_ENCODE_MULTILINE);
+    tt_int_op(dst_len,OP_EQ,179);
+ done:
+    tor_free(src);
+    tor_free(dst);
+    tor_free(cpy);
+}
+
+static void
+test_util_format_base64_encode_size_nopad(void *ignored)
+{
+    (void)ignored;
+    size_t dst_len;
+    int t1 = 37;
+    int t2 = 131;
+    int i;
+    int ret;
+    char *src = tor_malloc_zero(t2);
+    char *cpy = tor_malloc_zero(t2);
+    char *dst = tor_malloc_zero(500);
+
+    for (i=0; i<t2; i++) {
+        src[i] = (char)i;
+    }
+    memcpy(cpy,src,t2);
+
+    dst_len = base64_encode_size_nopad(t1,0);
+    tt_int_op(dst_len,OP_EQ,50);
+
+    dst_len = base64_encode_size_nopad(t2,0);
+    tt_int_op(dst_len,OP_EQ,175);
+
+    // +1 for the NUL byte
+    ret = base64_encode_nopad(dst,dst_len+1,(uint8_t*)src,t2);
+    tt_int_op(ret,OP_EQ,dst_len);
+
+    // +1 for the NUL byte
+    ret = base64_decode_nopad((uint8_t*)src,t2+1,dst,dst_len);
+    tt_int_op(ret,OP_EQ,t2);
+    tt_str_op(src,OP_EQ,cpy);
+
+    dst_len = base64_encode_size_nopad(t2,BASE64_ENCODE_MULTILINE);
+    tt_int_op(dst_len,OP_EQ,178);
+ done:
+    tor_free(src);
+    tor_free(dst);
+    tor_free(cpy);
+}
+
+static void
 test_util_format_base64_encode(void *ignored)
 {
   (void)ignored;
@@ -153,7 +237,10 @@ test_util_format_base64_decode_nopad(void *ignored)
   uint8_t *dst, *real_dst;
   uint8_t expected[] = {0x65, 0x78, 0x61, 0x6D, 0x70, 0x6C, 0x65};
   char real_src[] = "ZXhhbXBsZQ";
-
+  char src2[] = "SGksdGhpc2lzYXRlc3Rmb3JiYXNlNjRkZWNvZGVub3BhZGZ1bmN0aW";
+  uint8_t dst2[40];
+  char dst2_expected[] = "Hi,thisisatestforbase64decodenopadfuncti";
+  char src3[] = "d3JvbmdzaXpldGV4d";
   src = tor_malloc_zero(256);
   dst = tor_malloc_zero(1000);
   real_dst = tor_malloc_zero(10);
@@ -182,6 +269,13 @@ test_util_format_base64_decode_nopad(void *ignored)
   tt_int_op(res, OP_EQ, 7);
   tt_mem_op(real_dst, OP_EQ, expected, 7);
 
+  tt_int_op(54,OP_EQ,strlen(src2));
+  res = base64_decode_nopad(dst2,40,src2,54);
+  tt_mem_op(dst2,OP_EQ,dst2_expected,40)
+  tt_int_op(res,OP_EQ,40);
+
+  res = base64_decode_nopad(dst, 1000, src3, strlen(src3));
+  tt_int_op(res, OP_EQ, -1);
  done:
   tor_free(src);
   tor_free(dst);
@@ -381,6 +475,9 @@ test_util_format_base32_decode(void *arg)
 struct testcase_t util_format_tests[] = {
   { "unaligned_accessors", test_util_format_unaligned_accessors, 0,
     NULL, NULL },
+  { "base64_encode_size", test_util_format_base64_encode_size, 0, NULL, NULL },
+  { "base64_encode_size_nopad", test_util_format_base64_encode_size_nopad, 0,
+      NULL, NULL },
   { "base64_encode", test_util_format_base64_encode, 0, NULL, NULL },
   { "base64_decode_nopad", test_util_format_base64_decode_nopad, 0,
     NULL, NULL },
